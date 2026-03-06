@@ -234,69 +234,29 @@ program
 // ==================== 发布配置加载 ====================
 
 const PUBLISH_CONFIG_PATH = path.join(__dirname, '..', 'publish_config.json');
-const BATCH_CONFIG_PATH = path.join(__dirname, '..', 'batch.json');
-const WORKS_PATH = path.join(__dirname, '..', 'works.json');
 
 /**
- * 加载发布配置，兜底链路：
- * publish_config.json → batch.json → works.json 自动生成默认配置
+ * 加载发布配置，从 publish_config.json 读取
  */
 function loadPublishConfig() {
-  // 1. 优先读取 publish_config.json
-  if (fs.existsSync(PUBLISH_CONFIG_PATH)) {
-    try {
-      const raw = JSON.parse(fs.readFileSync(PUBLISH_CONFIG_PATH, 'utf-8'));
-      console.log('  配置来源: publish_config.json');
-      return {
-        works: raw.works || {},
-        platforms: raw.platforms || ['baijiahao', 'toutiao', 'wechat'],
-        publish: raw.publish ?? false,
-        interval: raw.interval ?? 30,
-      };
-    } catch (e) {
-      console.error(`publish_config.json 解析失败: ${e.message}`);
-      return null;
-    }
+  if (!fs.existsSync(PUBLISH_CONFIG_PATH)) {
+    console.error('未找到 publish_config.json，请先创建配置文件（参考 publish_config.json.example）');
+    return null;
   }
 
-  // 2. 兼容旧 batch.json（仅含 works 数量）
-  if (fs.existsSync(BATCH_CONFIG_PATH)) {
-    try {
-      const works = JSON.parse(fs.readFileSync(BATCH_CONFIG_PATH, 'utf-8'));
-      console.log('  配置来源: batch.json（兼容模式）');
-      return {
-        works,
-        platforms: ['baijiahao', 'toutiao', 'wechat'],
-        publish: false,
-        interval: 30,
-      };
-    } catch (e) {
-      console.error(`batch.json 解析失败: ${e.message}`);
-      return null;
-    }
+  try {
+    const raw = JSON.parse(fs.readFileSync(PUBLISH_CONFIG_PATH, 'utf-8'));
+    console.log('  配置来源: publish_config.json');
+    return {
+      works: raw.works || {},
+      platforms: raw.platforms || ['baijiahao', 'toutiao', 'wechat'],
+      publish: raw.publish ?? false,
+      interval: raw.interval ?? 30,
+    };
+  } catch (e) {
+    console.error(`publish_config.json 解析失败: ${e.message}`);
+    return null;
   }
-
-  // 3. 从 works.json 自动生成默认配置（每作品 1 篇，仅草稿）
-  if (fs.existsSync(WORKS_PATH)) {
-    try {
-      const worksList = JSON.parse(fs.readFileSync(WORKS_PATH, 'utf-8'));
-      const works = {};
-      for (const w of worksList) works[w] = 1;
-      console.log('  配置来源: works.json（自动生成默认配置，每作品 1 篇）');
-      return {
-        works,
-        platforms: ['baijiahao', 'toutiao', 'wechat'],
-        publish: false,
-        interval: 30,
-      };
-    } catch (e) {
-      console.error(`works.json 解析失败: ${e.message}`);
-      return null;
-    }
-  }
-
-  console.error('未找到任何配置文件（publish_config.json / batch.json / works.json）');
-  return null;
 }
 
 // ==================== 批量多作品 ====================
@@ -318,7 +278,7 @@ program
     // CLI 参数覆盖配置文件
     const shouldPublish = opts.publish !== undefined ? opts.publish : publishConfig.publish;
     const intervalSec = opts.interval ? parseInt(opts.interval) : publishConfig.interval;
-    const platformOpt = opts.platform || (publishConfig.platforms.length === 3 ? 'all' : publishConfig.platforms[0]);
+    const platforms = opts.platform ? parsePlatforms(opts.platform) : publishConfig.platforms;
 
     const entries = Object.entries(publishConfig.works).filter(([, n]) => n > 0);
     if (!entries.length) {
@@ -329,7 +289,6 @@ program
     const totalArticles = entries.reduce((sum, [, n]) => sum + n, 0);
     const interval = intervalSec * 1000;
     const imageDir = path.resolve(opts.images);
-    const platforms = parsePlatforms(platformOpt);
     const platformNames = platforms.map(platformLabel).join(' + ');
 
     console.log('='.repeat(60));

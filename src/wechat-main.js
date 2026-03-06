@@ -2,7 +2,7 @@
 /**
  * 微信公众号发布工具 CLI
  * 从 Notion 目录批量获取文章 → AI 自动配图 → 保存为公众号草稿
- * 所有作品配置（notionUrl、合集ID、配图目录）统一在 wx-works.json 中管理
+ * 所有作品配置统一在 publish_config.json 的 wechat 字段中管理
  */
 
 const { Command } = require('commander');
@@ -18,16 +18,24 @@ const { callLLM } = require('./llm');
 
 const SYNC_STATE_FILE = path.join(__dirname, '..', '.wx-sync-state.json');
 const WX_OUTPUT_DIR = path.join(__dirname, '..', 'output', 'wechat');
-const WX_WORKS_FILE = path.join(__dirname, '..', 'wx-works.json');
+const PUBLISH_CONFIG_PATH = path.join(__dirname, '..', 'publish_config.json');
 
 /**
  * 加载所有作品配置
+ * 从 publish_config.json 的 wechat 字段读取
  */
 function loadAllWorkConfigs() {
-  if (!fs.existsSync(WX_WORKS_FILE)) return {};
+  if (!fs.existsSync(PUBLISH_CONFIG_PATH)) {
+    console.error('未找到 publish_config.json，请先创建配置文件');
+    return {};
+  }
   try {
-    return JSON.parse(fs.readFileSync(WX_WORKS_FILE, 'utf-8'));
-  } catch { return {}; }
+    const config = JSON.parse(fs.readFileSync(PUBLISH_CONFIG_PATH, 'utf-8'));
+    return config.wechat || {};
+  } catch (e) {
+    console.error(`publish_config.json 解析失败: ${e.message}`);
+    return {};
+  }
 }
 
 /**
@@ -388,7 +396,7 @@ async function syncOneWork(api, workName, workConfig, opts) {
 
 program
   .command('batch')
-  .description('从 Notion 批量同步文章到公众号草稿（配置读取 wx-works.json）')
+  .description('从 Notion 批量同步文章到公众号草稿')
   .argument('[work]', '作品名称，不传则同步所有已配置 notionUrl 的作品')
   .option('--interval <seconds>', '每篇文章之间的间隔秒数', '15')
   .option('--no-auto-images', '不自动配图')
@@ -401,7 +409,7 @@ program
     if (work) {
       const config = allConfigs[work];
       if (!config) {
-        console.error(`作品 "${work}" 未在 wx-works.json 中配置`);
+        console.error(`作品 "${work}" 未在 publish_config.json 的 wechat 中配置`);
         console.log(`可用作品: ${Object.keys(allConfigs).join('、')}`);
         return;
       }
@@ -415,7 +423,7 @@ program
         .filter(([, c]) => c.notionUrl)
         .map(([name, config]) => ({ name, config }));
       if (!worksToSync.length) {
-        console.error('wx-works.json 中没有配置 notionUrl 的作品');
+        console.error('publish_config.json 的 wechat 中没有配置 notionUrl 的作品');
         return;
       }
       console.log(`将同步 ${worksToSync.length} 部作品: ${worksToSync.map(w => w.name).join('、')}`);

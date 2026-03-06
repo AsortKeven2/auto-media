@@ -77,48 +77,39 @@ images/
 └── cover.jpg          # 尾图
 ```
 
-### 4. 配置作品列表
+### 4. 配置发布
 
-创建 `works.json`（作品列表，用于选题生成）：
-
-```json
-["西游记", "三国演义", "水浒传"]
-```
-
-创建 `publish_config.json`（批量生成配置）：
+创建 `publish_config.json`（所有配置集中管理）：
 
 ```json
 {
   "works": {
     "西游记": 2,
-    "三国演义": 3
+    "三国演义": 1,
+    "水浒传": 1
   },
   "platforms": ["baijiahao", "toutiao", "wechat"],
   "publish": false,
-  "interval": 30
+  "interval": 30,
+  "wechat": {
+    "西游记": {
+      "notionUrl": "https://www.notion.so/xxx",
+      "album_id": "合集ID",
+      "album_title": "合集标题",
+      "image_dirs": ["西游记"]
+    }
+  }
 }
 ```
 
 字段说明：
-- `works`: 各作品生成文章数量
-- `platforms`: 发布平台列表
+- `works`: 各作品批量生成文章数量（作品名: 篇数）
+- `platforms`: 发布平台列表（baijiahao / toutiao / wechat）
 - `publish`: `true`=直接发布，`false`=仅保存草稿
 - `interval`: 每篇发布间隔秒数
+- `wechat`: 微信公众号 Notion 同步配置（可选，用于 `wx:batch`）
 
-> **兜底机制**: 如果 `publish_config.json` 不存在，会自动从 `works.json` 生成默认配置（每作品1篇，仅草稿），新项目可直接运行。
-
-创建 `wx-works.json`（微信公众号 Notion 同步配置）：
-
-```json
-{
-  "西游记": {
-    "notionUrl": "https://www.notion.so/xxx",
-    "album_id": "合集ID",
-    "album_title": "合集标题",
-    "image_dirs": ["西游记"]
-  }
-}
-```
+> **兜底机制**: 如果 `publish_config.json` 不存在，会尝试读取旧的 `batch.json` + `works.json`，都不存在则自动生成默认配置（每作品1篇，仅草稿），新项目可直接运行。
 
 ## 使用
 

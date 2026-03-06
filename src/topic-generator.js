@@ -10,7 +10,7 @@ const { buildCategoryPromptSection } = require('./categories');
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const ARTICLES_DIR = path.join(__dirname, '..', 'articles');
-const WORKS_PATH = path.join(__dirname, '..', 'works.json');
+const PUBLISH_CONFIG_PATH = path.join(__dirname, '..', 'publish_config.json');
 
 /**
  * 加载按作品分组的历史选题
@@ -103,7 +103,7 @@ function saveHistory(allHistory) {
  * 调用 AI 生成选题（按作品独立历史 + 分类别生成）
  */
 async function generateTopics(count = 10, workFilter = null) {
-  const works = JSON.parse(fs.readFileSync(WORKS_PATH, 'utf-8'));
+  const works = listWorks();
   const allHistory = loadPerNovelHistory();
 
   let allWorks = works;
@@ -229,8 +229,22 @@ ${categoryText}
   }
 }
 
+/**
+ * 获取所有作品列表
+ * 从 publish_config.json 的 works 字段读取
+ */
 function listWorks() {
-  return JSON.parse(fs.readFileSync(WORKS_PATH, 'utf-8'));
+  if (!fs.existsSync(PUBLISH_CONFIG_PATH)) {
+    console.error('未找到 publish_config.json，请先创建配置文件');
+    return [];
+  }
+  try {
+    const config = JSON.parse(fs.readFileSync(PUBLISH_CONFIG_PATH, 'utf-8'));
+    return Object.keys(config.works || {});
+  } catch (e) {
+    console.error(`publish_config.json 解析失败: ${e.message}`);
+    return [];
+  }
 }
 
 module.exports = { generateTopics, listWorks };

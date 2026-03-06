@@ -18,10 +18,9 @@ const REFERENCE_DIR = path.join(__dirname, '..', 'output', 'wechat');
  * @returns {Promise<string[]>} 涉及的作品列表
  */
 async function detectWorksFromTitle(title) {
-  const worksPath = path.join(__dirname, '..', 'works.json');
-  if (!fs.existsSync(worksPath)) return [];
-
-  const allWorks = JSON.parse(fs.readFileSync(worksPath, 'utf-8'));
+  const { listWorks } = require('./topic-generator');
+  const allWorks = listWorks();
+  if (!allWorks.length) return [];
 
   const prompt = `分析以下标题，判断涉及哪些作品。
 

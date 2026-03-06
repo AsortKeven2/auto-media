@@ -24,7 +24,20 @@ if (!CHROME_PATH || !fs.existsSync(CHROME_PATH)) {
   process.exit(1);
 }
 
-const WORKS = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'works.json'), 'utf-8'));
+const PUBLISH_CONFIG_PATH = path.join(__dirname, '..', 'publish_config.json');
+
+if (!fs.existsSync(PUBLISH_CONFIG_PATH)) {
+  console.error('未找到 publish_config.json，请先创建配置文件');
+  process.exit(1);
+}
+let WORKS;
+try {
+  const config = JSON.parse(fs.readFileSync(PUBLISH_CONFIG_PATH, 'utf-8'));
+  WORKS = Object.keys(config.works || {});
+} catch (e) {
+  console.error(`publish_config.json 解析失败: ${e.message}`);
+  process.exit(1);
+}
 
 // 解析参数
 const args = process.argv.slice(2);

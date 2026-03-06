@@ -15,9 +15,6 @@ output/
 logs/
 
 # 作品配置（含 Notion 链接等个人数据）
-works.json
-wx-works.json
-batch.json
 publish_config.json
 
 # 同步状态

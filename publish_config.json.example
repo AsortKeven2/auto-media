@@ -1,30 +1,18 @@
 {
   "works": {
     "西游记": 2,
-    "水浒传": 1,
     "三国演义": 1,
-    "射雕英雄传": 1,
-    "天龙八部": 1,
-    "笑傲江湖": 1,
-    "鹿鼎记": 1
+    "水浒传": 1
   },
   "platforms": ["baijiahao", "toutiao", "wechat"],
   "publish": false,
-  "interval": 30
+  "interval": 30,
+  "wechat": {
+    "西游记": {
+      "album_id": "合集ID",
+      "album_title": "合集标题",
+      "image_dirs": ["西游记"],
+      "notionUrl": "https://www.notion.so/xxx"
+    }
+  }
 }
-
-// 字段说明：
-// - works: 各作品生成文章数量（作品名: 篇数）
-// - platforms: 发布平台列表，可选 baijiahao / toutiao / wechat
-// - publish: true=直接发布，false=仅保存草稿
-// - interval: 每篇发布间隔秒数
-//
-// CLI 参数可覆盖配置：
-// --publish / --no-publish: 覆盖 publish 字段
-// --platform <name>: 覆盖 platforms 字段
-// --interval <seconds>: 覆盖 interval 字段
-//
-// 兜底机制：
-// 1. 优先读取 publish_config.json
-// 2. 不存在时读取 batch.json（兼容旧配置）
-// 3. 都不存在时自动从 works.json 生成默认配置（每作品1篇，仅草稿）
