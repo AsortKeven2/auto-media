@@ -10,11 +10,11 @@
   "scripts": {
     "check": "node src/main.js check",
     "list": "node src/main.js list",
-    "batch": "node src/main.js batch --publish",
+    "batch": "node src/main.js batch",
     "batch:dry": "node src/main.js batch --no-push",
-    "batch:bjh": "node src/main.js batch --publish --platform baijiahao",
+    "batch:bjh": "node src/main.js batch --platform baijiahao",
     "batch:tt": "node src/main.js batch --platform toutiao",
-    "batch:wx": "node src/main.js batch --publish --platform wechat",
+    "batch:wx": "node src/main.js batch --platform wechat",
     "push-ready": "node src/main.js push-ready --publish",
     "push-ready:bjh": "node src/main.js push-ready --publish --platform baijiahao",
     "push-ready:tt": "node src/main.js push-ready --platform toutiao",
@@ -24,7 +24,7 @@
     "wx:batch": "node src/wechat-main.js batch",
     "wx:list": "node src/wechat-main.js list",
     "wx:clean": "node src/wechat-main.js clean",
-    "help": "node -e \"var h={'check':'检查所有平台登录状态','list':'列出所有文章及状态','batch':'按batch.json配置批量生成并发布','batch:dry':'批量生成但不推送(试跑)','batch:bjh':'批量生成仅发百家号','batch:tt':'批量生成仅发头条','push-ready':'推送ready文章到双平台','push-ready:bjh':'仅推送到百家号','push-ready:tt':'仅推送到头条','wx:check':'检查公众号登录状态','wx:login':'设置公众号Cookie  <cookie字符串>','wx:list':'列出公众号草稿箱所有草稿','wx:clean':'删除所有草稿并清空同步状态','wx:batch':'按wx-works.json批量同步  [作品名] [--interval 秒数] [--force] [--no-auto-images]','help':'显示本帮助'};Object.keys(h).forEach(k=>console.log('  '+k.padEnd(18)+h[k]))\""
+    "help": "node -e \"var h={'check':'检查所有平台登录状态','list':'列出所有文章及状态','batch':'按publish_config.json批量生成并发布(自动兜底)','batch:dry':'批量生成但不推送(试跑)','batch:bjh':'批量生成仅发百家号','batch:tt':'批量生成仅发头条','batch:wx':'批量生成仅发公众号','push-ready':'推送ready文章到双平台','push-ready:bjh':'仅推送到百家号','push-ready:tt':'仅推送到头条','wx:check':'检查公众号登录状态','wx:login':'设置公众号Cookie  <cookie字符串>','wx:list':'列出公众号草稿箱所有草稿','wx:clean':'删除所有草稿并清空同步状态','wx:batch':'按wx-works.json批量同步  [作品名] [--interval 秒数] [--force] [--no-auto-images]','help':'显示本帮助'};Object.keys(h).forEach(k=>console.log('  '+k.padEnd(18)+h[k]))\""
   },
   "dependencies": {
     "axios": "^1.6.0",

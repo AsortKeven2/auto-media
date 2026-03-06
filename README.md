@@ -79,22 +79,35 @@ images/
 
 ### 4. 配置作品列表
 
-创建 `works.json`（百家号/头条号选题用）：
+创建 `works.json`（作品列表，用于选题生成）：
 
 ```json
 ["西游记", "三国演义", "水浒传"]
 ```
 
-创建 `batch.json`（批量生成配置）：
+创建 `publish_config.json`（批量生成配置）：
 
 ```json
 {
-  "西游记": 2,
-  "三国演义": 3
+  "works": {
+    "西游记": 2,
+    "三国演义": 3
+  },
+  "platforms": ["baijiahao", "toutiao", "wechat"],
+  "publish": false,
+  "interval": 30
 }
 ```
 
-创建 `wx-works.json`（微信公众号配置）：
+字段说明：
+- `works`: 各作品生成文章数量
+- `platforms`: 发布平台列表
+- `publish`: `true`=直接发布，`false`=仅保存草稿
+- `interval`: 每篇发布间隔秒数
+
+> **兜底机制**: 如果 `publish_config.json` 不存在，会自动从 `works.json` 生成默认配置（每作品1篇，仅草稿），新项目可直接运行。
+
+创建 `wx-works.json`（微信公众号 Notion 同步配置）：
 
 ```json
 {
@@ -134,11 +147,14 @@ node src/main.js outline "孙悟空大闹天宫，真的是故意留手吗？"
 node src/main.js push articles/xxx.md
 node src/main.js push articles/xxx.md -p wechat    # 推送到公众号
 
-# 批量生成 + 发布（默认三平台）
-node src/main.js batch --publish
-node src/main.js batch --no-push          # 仅生成不推送
-node src/main.js batch -p baijiahao       # 仅发百家号
-node src/main.js batch -p wechat          # 仅发公众号
+# 批量生成 + 发布
+node src/main.js batch                # 按 publish_config.json 配置执行
+node src/main.js batch --no-push      # 仅生成不推送
+node src/main.js batch --publish      # 强制发布（覆盖配置）
+node src/main.js batch --no-publish   # 强制仅草稿（覆盖配置）
+node src/main.js batch -p baijiahao   # 仅发百家号（覆盖配置）
+node src/main.js batch -p wechat      # 仅发公众号（覆盖配置）
+node src/main.js batch --interval 60  # 自定义间隔秒数（覆盖配置）
 
 # 推送所有 ready 状态文章
 node src/main.js push-ready --publish

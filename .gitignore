@@ -18,6 +18,7 @@ logs/
 works.json
 wx-works.json
 batch.json
+publish_config.json
 
 # 同步状态
 .wx-sync-state.json

@@ -26,6 +26,7 @@ function loadPerNovelHistory() {
       if (Array.isArray(parsed)) {
         console.log('  检测到旧格式 topics_history.json，自动迁移为按作品分组...');
         raw = migrateFromFlatArray(parsed);
+        if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
         fs.writeFileSync(historyPath, JSON.stringify(raw, null, 2), 'utf-8');
         console.log('  迁移完成');
       } else {
@@ -88,6 +89,9 @@ function migrateFromFlatArray(flatArray) {
 }
 
 function saveHistory(allHistory) {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
   fs.writeFileSync(
     path.join(DATA_DIR, 'topics_history.json'),
     JSON.stringify(allHistory, null, 2),
