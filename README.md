@@ -196,23 +196,6 @@ node scripts/download-images.js 水浒传 武大郎 宋江 -n 5
 
 > 如果提示找不到 Chrome 浏览器，需要在 `.env.local` 中配置 `CHROME_PATH`。
 
-**2. 去除图片水印**
-
-裁剪图片底部水印区域（默认裁掉底部 10%），需要 Python 3 和 Pillow：
-
-```bash
-pip install Pillow
-
-# 裁剪指定文件
-python3 scripts/remove-watermark.py file1.jpg file2.jpg
-
-# 裁剪整个目录
-python3 scripts/remove-watermark.py --dir downloads/水浒传
-
-# 自定义裁剪比例（裁掉底部 15%）
-python3 scripts/remove-watermark.py --ratio 0.15 file.jpg
-```
-
 ## 项目结构
 
 ```
@@ -234,7 +217,6 @@ python3 scripts/remove-watermark.py --ratio 0.15 file.jpg
 │   └── env.js               # 配置加载
 ├── scripts/
 │   ├── download-images.js   # 图片下载工具
-│   └── remove-watermark.py  # 水印去除工具
 ├── package.json
 └── .env.local.example       # 配置模板
 ```
