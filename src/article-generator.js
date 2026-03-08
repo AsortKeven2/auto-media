@@ -9,9 +9,6 @@ const { callLLM } = require('./llm');
 const { listImagesByGroup } = require('./image-library');
 const { getCategory } = require('./categories');
 
-/** 范文目录 */
-const REFERENCE_DIR = path.join(__dirname, '..', 'output', 'wechat');
-
 /**
  * 从标题中识别涉及的作品
  * @param {string} title 文章标题
@@ -50,40 +47,6 @@ async function detectWorksFromTitle(title) {
 }
 
 /**
- * 从范文目录中随机挑选 1-2 篇文章的开头和精彩段落作为风格参考
- * 只取片段，避免 prompt 过长
- */
-function buildStyleReference() {
-  if (!fs.existsSync(REFERENCE_DIR)) return '';
-
-  const files = fs.readdirSync(REFERENCE_DIR).filter(f => f.endsWith('.md'));
-  if (!files.length) return '';
-
-  // 随机挑 2 篇
-  const shuffled = files.sort(() => Math.random() - 0.5);
-  const picked = shuffled.slice(0, 2);
-
-  const excerpts = [];
-  for (const file of picked) {
-    const content = fs.readFileSync(path.join(REFERENCE_DIR, file), 'utf-8');
-    // 去掉 front-matter
-    const body = content.replace(/^---[\s\S]*?---\s*/, '').trim();
-    // 取前 600 字作为风格参考（包含开头和第一个分析段）
-    const excerpt = body.slice(0, 600);
-    const title = path.basename(file, '.md');
-    excerpts.push(`【范文片段：${title}】\n${excerpt}……`);
-  }
-
-  return `
-以下是两篇高质量范文的开头片段，请仔细体会它们的语气、节奏、段落长度和分析方式，你写的文章必须达到同样的质量水准：
-
-${excerpts.join('\n\n')}
-
-注意：范文仅供风格参考，不要抄袭范文内容，不要在文章中提及范文。
-`;
-}
-
-/**
  * 构建去重图片名称列表（只取当前作品，同名只取一个）
  * 如 郭襄/郭襄1/郭襄2 只显示"郭襄"
  * @param {string} imageDir 图片根目录
@@ -114,8 +77,6 @@ function buildImageList(imageDir, work, allowedGroups) {
 function buildPrompt(topic, outline, work, imageList, category) {
   const catDef = category ? getCategory(category) : null;
 
-  const styleReference = buildStyleReference();
-
   const writingRequirements = catDef
     ? catDef.articlePrompt
     : `要求：
@@ -139,7 +100,7 @@ function buildPrompt(topic, outline, work, imageList, category) {
   }
 
   return `根据以下选题，写一篇百家号文章。
-${styleReference}
+
 选题：${topic}
 作品：${work}
 类别：${category || '自由'}
