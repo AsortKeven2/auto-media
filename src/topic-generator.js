@@ -6,7 +6,7 @@
 const fs = require('fs');
 const path = require('path');
 const { callLLM } = require('./llm');
-const { buildCategoryPromptSection } = require('./categories');
+const { buildCategoryPromptSection, CATEGORIES } = require('./categories');
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const ARTICLES_DIR = path.join(__dirname, '..', 'archive', 'baijiahao');
@@ -126,11 +126,25 @@ async function generateTopics(count = 10, workFilter = null) {
 
   const categoryText = buildCategoryPromptSection();
 
+  // 本地随机分配类别，不依赖 AI 选择
+  const categoryNames = Object.keys(CATEGORIES);
+  const assignedCategories = [];
+  for (let i = 0; i < count; i++) {
+    assignedCategories.push(categoryNames[Math.floor(Math.random() * categoryNames.length)]);
+  }
+
+  const categoryAssignment = assignedCategories
+    .map((cat, i) => `第${i + 1}个选题 → ${cat}`)
+    .join('\n');
+
   const prompt = `为百家号/头条号生成 ${count} 个关于《${work}》的爆款选题。
 ${historyText}
 
-选题必须属于以下 4 个类别之一，尽量均匀分布：
+类别说明：
 ${categoryText}
+
+【每个选题的类别已指定，严格按以下分配】
+${categoryAssignment}
 
 【优质标题参考案例 - 多种句式】
 以下是高质量标题的不同写法，每种句式都不同：
@@ -204,20 +218,24 @@ ${categoryText}
 
     if (!allHistory[work]) allHistory[work] = [];
 
-    for (const t of topics) {
+    for (let idx = 0; idx < topics.length; idx++) {
+      const t = topics[idx];
       if (!t.topic) continue;
       // 仅精确匹配去重，语义去重交给 AI
       if (allHistory[work].includes(t.topic)) continue;
 
+      // 用本地分配的类别，不信任 AI 返回的 category
+      const category = assignedCategories[idx];
+
       allHistory[work].push(t.topic);
       results.push({
         topic: t.topic,
-        category: t.category || '疑问解读类',
-        type: t.category || '深度解读',
+        category,
+        type: category,
         work,
         main_character: t.main_character || (t.characters && t.characters[0]) || '',
         characters: t.characters || [],
-        related_works: t.related_works || [work], // 涉及的作品列表，用于配图
+        related_works: t.related_works || [work],
       });
     }
 

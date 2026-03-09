@@ -502,7 +502,7 @@ program
             imageDir,
             t.category,
             t.related_works,
-            { wordCount: '2000-3000', maxTokens: 6000 }
+            { wordCount: '2500-3500', maxTokens: 10000 }
           );
           const wordCount = content.replace(/\s/g, '').replace(/[#*\-\[\]()]/g, '').length;
           console.log(`  生成完成: ${wordCount} 字`);

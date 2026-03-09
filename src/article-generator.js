@@ -76,12 +76,12 @@ function buildImageList(imageDir, work, allowedGroups) {
 
 function buildPrompt(topic, outline, work, imageList, category, opts = {}) {
   const catDef = category ? getCategory(category) : null;
-  const wordCountOverride = opts.wordCount;
+  const wordCount = opts.wordCount || (catDef && catDef.maxWords);
 
   let writingRequirements = catDef
     ? catDef.articlePrompt
     : `要求：
-- 1500-2500 字
+- 字数 {wordCount}
 - 不要全是书面语、文学风，不要AI腔，像跟读者聊天而不是写论文
 - 段落要有节奏感，大多数段落 150-280 字，过渡设问段可短些，禁止超过 350 字的大段
 - 围绕标题疑问拆解，多结合影视名场面展开，描述具体场景要有画面感
@@ -91,15 +91,19 @@ function buildPrompt(topic, outline, work, imageList, category, opts = {}) {
 - 禁止使用[1][2]等引用标注
 - 结尾用开放性问题收束，邀请读者讨论`;
 
-  // 覆盖字数要求
-  if (wordCountOverride) {
-    writingRequirements = writingRequirements
-      .replace(/字数[^\n]*\n/g, '')
-      .replace(/- ?\d+-\d+ 字/g, `- ${wordCountOverride} 字`)
-      .replace(/- ?字数不超过 ?\d+/g, `- ${wordCountOverride} 字`);
-    // 如果上面的替换都没命中（没有匹配的字数行），在开头插入
-    if (!writingRequirements.includes(wordCountOverride)) {
-      writingRequirements = writingRequirements.replace(/(【.*?专属要求】\n)/, `$1- 字数 ${wordCountOverride}\n`);
+  // 统一替换字数占位符
+  writingRequirements = writingRequirements.replace(/\{wordCount\}/g, wordCount);
+
+  // 字数较高时，放宽段落和章节约束（避免与字数要求矛盾）
+  if (wordCount) {
+    const min = parseInt(wordCount.match(/\d+/)?.[0] || '0', 10);
+    if (min >= 2500) {
+      writingRequirements = writingRequirements
+        .replace(/150-280 字/g, '200-400 字')
+        .replace(/禁止超过 350 字的大段/g, '禁止超过 500 字的大段')
+        .replace(/核心分析段可以到 300 字左右/g, '核心分析段可以到 450 字左右')
+        .replace(/4-6 个递进的小疑问/g, '6-8 个递进的小疑问')
+        .replace(/4-6 个章节/g, '6-8 个章节');
     }
   }
 
@@ -245,7 +249,7 @@ function stripLastSectionImages(article) {
  */
 async function generateArticle(topic, outline, work, characters, imageDir, category, relatedWorks, opts = {}) {
   const catDef = category ? getCategory(category) : null;
-  const maxTokens = opts.maxTokens || (catDef ? catDef.maxTokens : 4000);
+  const maxTokens = opts.maxTokens || (catDef ? catDef.maxTokens : 10000);
 
   // 如果有 relatedWorks，使用它作为图片目录列表；否则只用 work
   const allowedGroups = relatedWorks && relatedWorks.length > 0 ? relatedWorks : (work ? [work] : []);
