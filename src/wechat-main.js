@@ -12,12 +12,14 @@ const fs = require('fs');
 const { WechatAPI } = require('./wechat-api');
 const { fetchNotionPage, fetchNotionDirectory } = require('./notion-fetcher');
 const { mdToHtml, extractImagePaths, DEFAULT_IMAGE_DIR, DEFAULT_TAIL_IMAGE } = require('./batch-publish');
-const { buildImageList, resolveImageNames, stripLastSectionImages } = require('./article-generator');
+const { buildImageList, resolveImageNames, stripLastSectionImages, generateArticle } = require('./article-generator');
 const { selectCoverImage } = require('./image-library');
+const { generateTopics } = require('./topic-generator');
 const { callLLM } = require('./llm');
 
 const SYNC_STATE_FILE = path.join(__dirname, '..', '.wx-sync-state.json');
-const WX_OUTPUT_DIR = path.join(__dirname, '..', 'output', 'wechat');
+const WX_SYNC_DIR = path.join(__dirname, '..', 'archive', 'wechat', 'sync');
+const WX_GENERATED_DIR = path.join(__dirname, '..', 'archive', 'wechat', 'generated');
 const PUBLISH_CONFIG_PATH = path.join(__dirname, '..', 'publish_config.json');
 
 /**
@@ -66,17 +68,21 @@ function saveSyncState(state) {
 }
 
 /**
- * 归档 AI 配图后的文章 Markdown 到 output/wechat/ 目录
+ * 归档 AI 配图后的文章 Markdown
+ * @param {string} title 文章标题
+ * @param {string} markdown 文章内容
+ * @param {string} outputDir 归档目录
  */
-function saveArticleArchive(title, markdown) {
-  if (!fs.existsSync(WX_OUTPUT_DIR)) {
-    fs.mkdirSync(WX_OUTPUT_DIR, { recursive: true });
+function saveArticleArchive(title, markdown, outputDir) {
+  if (!fs.existsSync(outputDir)) {
+    fs.mkdirSync(outputDir, { recursive: true });
   }
   // 清理标题中的特殊字符作为文件名
   const safeName = title.replace(/[*"/\\<>|?:]/g, '').trim();
-  const filePath = path.join(WX_OUTPUT_DIR, `${safeName}.md`);
+  const filePath = path.join(outputDir, `${safeName}.md`);
   fs.writeFileSync(filePath, markdown, 'utf-8');
-  console.log(`  归档: output/wechat/${safeName}.md`);
+  const relPath = path.relative(path.join(__dirname, '..'), outputDir);
+  console.log(`  归档: ${relPath}/${safeName}.md`);
 }
 
 /**
@@ -305,7 +311,7 @@ async function syncOneWork(api, workName, workConfig, opts) {
       }
 
       // 归档 AI 配图后的文章
-      saveArticleArchive(title, finalMarkdown);
+      saveArticleArchive(title, finalMarkdown, WX_SYNC_DIR);
 
       // 尾图
       const tailImage = DEFAULT_TAIL_IMAGE;
@@ -391,6 +397,218 @@ async function syncOneWork(api, workName, workConfig, opts) {
 
   return { success: successCount, fail: failCount };
 }
+
+// ==================== AI 直接生成 ====================
+
+/**
+ * AI 直接生成文章并推送到微信草稿箱
+ * 读取 wechat 配置中每个作品的 count，生成对应数量的文章
+ */
+program
+  .command('generate')
+  .description('AI 直接生成文章 → 推送到公众号草稿箱（按 wechat 配置的 count）')
+  .argument('[work]', '作品名称，不传则处理所有 count > 0 的作品')
+  .option('--interval <seconds>', '每篇文章之间的间隔秒数', '15')
+  .option('--no-push', '仅生成文章，不推送到草稿箱')
+  .action(async (work, opts) => {
+    const allConfigs = loadAllWorkConfigs();
+    const imageDir = path.resolve(DEFAULT_IMAGE_DIR);
+    const interval = parseInt(opts.interval) * 1000;
+
+    // 确定要生成的作品列表
+    let worksToGenerate;
+    if (work) {
+      const config = allConfigs[work];
+      if (!config) {
+        console.error(`作品 "${work}" 未在 publish_config.json 的 wechat 中配置`);
+        console.log(`可用作品: ${Object.keys(allConfigs).join('、')}`);
+        return;
+      }
+      const count = config.count || 0;
+      if (count <= 0) {
+        console.log(`作品 "${work}" 的 count 为 ${count}，无需生成`);
+        return;
+      }
+      worksToGenerate = [{ name: work, config, count }];
+    } else {
+      worksToGenerate = Object.entries(allConfigs)
+        .filter(([, c]) => (c.count || 0) > 0)
+        .map(([name, config]) => ({ name, config, count: config.count }));
+      if (!worksToGenerate.length) {
+        console.error('publish_config.json 的 wechat 中没有 count > 0 的作品');
+        return;
+      }
+    }
+
+    const totalArticles = worksToGenerate.reduce((sum, w) => sum + w.count, 0);
+
+    console.log('='.repeat(60));
+    console.log('  微信公众号 - AI 直接生成');
+    console.log('='.repeat(60));
+    worksToGenerate.forEach(w => console.log(`  ${w.name}: ${w.count} 篇`));
+    console.log(`  合计: ${totalArticles} 篇`);
+    console.log(`  间隔: ${opts.interval} 秒`);
+    console.log(`  推送: ${opts.push !== false ? '保存到草稿箱' : '仅生成不推送'}`);
+    console.log('='.repeat(60));
+
+    // 检查登录
+    let api;
+    if (opts.push !== false) {
+      api = new WechatAPI();
+      const auth = await api.checkAuth();
+      if (!auth.success) {
+        console.error('公众号未登录，请先运行: wx login "<cookie>"');
+        return;
+      }
+    }
+
+    let globalIdx = 0;
+    let totalSuccess = 0;
+    let totalFail = 0;
+    const allResults = [];
+
+    for (const { name: workName, config: workConfig, count } of worksToGenerate) {
+      console.log(`\n${'#'.repeat(60)}`);
+      console.log(`  ${workName} — 计划 ${count} 篇`);
+      console.log('#'.repeat(60));
+
+      // 生成选题
+      const topics = await generateTopics(count, workName);
+      if (!topics.length) {
+        console.error(`  ${workName}: 选题生成失败`);
+        totalFail += count;
+        continue;
+      }
+      console.log(`  生成了 ${topics.length} 个选题`);
+      topics.forEach((t, i) => console.log(`    ${i + 1}. [${t.category}] ${t.topic}`));
+
+      const allowedGroups = workConfig.image_dirs || [workName];
+
+      for (let i = 0; i < topics.length; i++) {
+        globalIdx++;
+        const t = topics[i];
+        console.log(`\n${'─'.repeat(60)}`);
+        console.log(`  [${globalIdx}/${totalArticles}] ${workName} — ${t.topic}`);
+        console.log('─'.repeat(60));
+
+        try {
+          // 1. AI 生成文章
+          console.log('  AI 写作中...');
+          const { article: content, imageStats } = await generateArticle(
+            t.topic,
+            null,
+            t.work,
+            t.characters,
+            imageDir,
+            t.category,
+            t.related_works,
+            { wordCount: '2000-3000', maxTokens: 6000 }
+          );
+          const wordCount = content.replace(/\s/g, '').replace(/[#*\-\[\]()]/g, '').length;
+          console.log(`  生成完成: ${wordCount} 字`);
+          if (imageStats.matched.length) {
+            console.log(`  配图: ${imageStats.matched.length} 张匹配`);
+          }
+          if (imageStats.missing.length) {
+            console.log(`  缺失: ${imageStats.missing.join('、')}`);
+          }
+
+          // 归档文章
+          saveArticleArchive(t.topic, content, WX_GENERATED_DIR);
+
+          if (opts.push === false) {
+            console.log('  跳过推送（--no-push）');
+            totalSuccess++;
+            allResults.push({ work: workName, title: t.topic, success: true, skipped: true });
+            continue;
+          }
+
+          // 间隔等待
+          if (globalIdx > 1) {
+            console.log(`  等待 ${opts.interval} 秒...`);
+            await new Promise(r => setTimeout(r, interval));
+          }
+
+          // 2. 追加尾图
+          let finalMarkdown = content;
+          const tailImage = DEFAULT_TAIL_IMAGE;
+          if (tailImage && fs.existsSync(tailImage)) {
+            finalMarkdown += `\n\n![尾图](${tailImage})\n`;
+          }
+
+          // 3. 转 HTML
+          let html = mdToHtml(finalMarkdown, 'wechat');
+
+          // 4. 封面
+          const imagePaths = extractImagePaths(finalMarkdown);
+          let coverUrl = null;
+          const coverResult = selectCoverImage({
+            title: t.topic,
+            imageDir,
+            workFilter: workName,
+            articleImagePaths: imagePaths,
+          });
+
+          if (coverResult.coverPath) {
+            if (coverResult.fromLibrary) {
+              console.log(`  封面（标题角色）: ${path.basename(coverResult.coverPath)}`);
+            } else {
+              console.log(`  封面（文中配图）: ${path.basename(coverResult.coverPath)}`);
+            }
+            const uploaded = await api.uploadImage(coverResult.coverPath);
+            coverUrl = uploaded?.url || null;
+          }
+
+          // 5. 上传正文图片
+          console.log('  上传图片...');
+          html = await api.processContentImages(html);
+          html = html.replace(/<img[^>]+src="(?!https?:\/\/)[^"]*"[^>]*>/gi, () => '');
+
+          // 6. 保存草稿
+          console.log('  保存草稿...');
+          const albumInfo = buildAlbumInfo(workConfig);
+          const result = await api.saveDraft(t.topic, html, coverUrl, { albumInfo });
+
+          if (result.success) {
+            totalSuccess++;
+            console.log(`  ✓ 草稿已保存 (ID: ${result.article_id})`);
+            allResults.push({ work: workName, title: t.topic, success: true, article_id: result.article_id, draft_url: result.draft_url });
+          } else {
+            totalFail++;
+            console.error(`  ✗ 草稿保存失败: ${result.message}`);
+            allResults.push({ work: workName, title: t.topic, success: false, message: result.message });
+          }
+        } catch (e) {
+          totalFail++;
+          console.error(`  ✗ 处理失败: ${e.message}`);
+          allResults.push({ work: workName, title: t.topic, success: false, message: e.message });
+        }
+      }
+    }
+
+    // 汇总
+    console.log(`\n${'='.repeat(60)}`);
+    console.log('  生成完成');
+    console.log('='.repeat(60));
+    console.log(`  计划: ${totalArticles} 篇 | 成功: ${totalSuccess} 篇 | 失败: ${totalFail} 篇`);
+    if (worksToGenerate.length > 1) {
+      console.log('\n各作品统计:');
+      for (const { name: workName } of worksToGenerate) {
+        const workResults = allResults.filter(r => r.work === workName);
+        const workSuccess = workResults.filter(r => r.success).length;
+        console.log(`  ${workName}: ${workSuccess}/${workResults.length}`);
+      }
+    }
+    if (allResults.length) {
+      console.log('\n详情:');
+      allResults.forEach((r, i) => {
+        const icon = r.skipped ? '○' : r.success ? '✓' : '✗';
+        console.log(`  ${icon} ${i + 1}. [${r.work}] ${r.title}`);
+        if (r.draft_url) console.log(`      ${r.draft_url}`);
+        if (!r.success && r.message) console.log(`      ${r.message}`);
+      });
+    }
+  });
 
 // ==================== 批量同步 ====================
 

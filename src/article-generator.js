@@ -74,10 +74,11 @@ function buildImageList(imageDir, work, allowedGroups) {
   return `【${labels.join('+')}】${[...names].sort().join('、')}\n`;
 }
 
-function buildPrompt(topic, outline, work, imageList, category) {
+function buildPrompt(topic, outline, work, imageList, category, opts = {}) {
   const catDef = category ? getCategory(category) : null;
+  const wordCountOverride = opts.wordCount;
 
-  const writingRequirements = catDef
+  let writingRequirements = catDef
     ? catDef.articlePrompt
     : `要求：
 - 1500-2500 字
@@ -89,6 +90,18 @@ function buildPrompt(topic, outline, work, imageList, category) {
 - 禁止使用"不难发现""显而易见""综上所述""值得注意的是"等AI套话
 - 禁止使用[1][2]等引用标注
 - 结尾用开放性问题收束，邀请读者讨论`;
+
+  // 覆盖字数要求
+  if (wordCountOverride) {
+    writingRequirements = writingRequirements
+      .replace(/字数[^\n]*\n/g, '')
+      .replace(/- ?\d+-\d+ 字/g, `- ${wordCountOverride} 字`)
+      .replace(/- ?字数不超过 ?\d+/g, `- ${wordCountOverride} 字`);
+    // 如果上面的替换都没命中（没有匹配的字数行），在开头插入
+    if (!writingRequirements.includes(wordCountOverride)) {
+      writingRequirements = writingRequirements.replace(/(【.*?专属要求】\n)/, `$1- 字数 ${wordCountOverride}\n`);
+    }
+  }
 
   // 有大纲时附上大纲，无大纲时让 AI 自由发挥
   let outlineSection = '';
@@ -230,14 +243,14 @@ function stripLastSectionImages(article) {
 /**
  * 生成文章（AI 自主决定配图）
  */
-async function generateArticle(topic, outline, work, characters, imageDir, category, relatedWorks) {
+async function generateArticle(topic, outline, work, characters, imageDir, category, relatedWorks, opts = {}) {
   const catDef = category ? getCategory(category) : null;
-  const maxTokens = catDef ? catDef.maxTokens : 4000;
+  const maxTokens = opts.maxTokens || (catDef ? catDef.maxTokens : 4000);
 
   // 如果有 relatedWorks，使用它作为图片目录列表；否则只用 work
   const allowedGroups = relatedWorks && relatedWorks.length > 0 ? relatedWorks : (work ? [work] : []);
   const imageList = imageDir ? buildImageList(imageDir, work, allowedGroups) : '';
-  const prompt = buildPrompt(topic, outline, work, imageList, category);
+  const prompt = buildPrompt(topic, outline, work, imageList, category, opts);
 
   let article = await callLLM(prompt, { maxTokens });
 

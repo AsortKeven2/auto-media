@@ -176,7 +176,7 @@ program
   .argument('<file>', '文章文件名（articles/ 目录下）')
   .argument('<status>', '新状态')
   .action((file, status) => {
-    const articlesDir = path.resolve(__dirname, '..', 'articles');
+    const articlesDir = path.resolve(__dirname, '..', 'archive', 'baijiahao');
     const filePath = path.join(articlesDir, file);
     if (!fs.existsSync(filePath)) {
       console.error(`文件不存在: ${filePath}`);

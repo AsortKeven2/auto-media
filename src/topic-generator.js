@@ -9,7 +9,7 @@ const { callLLM } = require('./llm');
 const { buildCategoryPromptSection } = require('./categories');
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
-const ARTICLES_DIR = path.join(__dirname, '..', 'articles');
+const ARTICLES_DIR = path.join(__dirname, '..', 'archive', 'baijiahao');
 const PUBLISH_CONFIG_PATH = path.join(__dirname, '..', 'publish_config.json');
 
 /**

@@ -21,6 +21,7 @@
     "push-ready:wx": "node src/main.js push-ready --publish --platform wechat",
     "wx:check": "node src/wechat-main.js check",
     "wx:login": "node src/wechat-main.js login",
+    "wx:generate": "node src/wechat-main.js generate",
     "wx:batch": "node src/wechat-main.js batch",
     "wx:list": "node src/wechat-main.js list",
     "wx:clean": "node src/wechat-main.js clean",
