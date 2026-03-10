@@ -144,7 +144,7 @@ program
   .description('生成文章大纲')
   .argument('<topic>', '选题标题')
   .option('-t, --type <type>', '指定类型')
-  .option('--category <cat>', '指定类别（疑问解读类/盘点对比类/细节深挖类/反差揭秘类）')
+  .option('--category <cat>', '指定类别（疑问解读类/细节深挖类/反差揭秘类/数字盘点类/假设对比类）')
   .action(async (topic, opts) => {
     const outline = await generateOutline(topic, opts.type || null, opts.category || null);
     console.log(formatOutline(outline));

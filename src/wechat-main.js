@@ -473,7 +473,7 @@ program
       console.log('#'.repeat(60));
 
       // 生成选题
-      const topics = await generateTopics(count, workName);
+      const topics = await generateTopics(count, workName, 'wechat');
       if (!topics.length) {
         console.error(`  ${workName}: 选题生成失败`);
         totalFail += count;
