@@ -489,6 +489,256 @@ class WechatAPI {
 
   // ==================== 发布 ====================
 
+  /**
+   * 保存多篇文章到同一个草稿（多图文）
+   * @param {Array<{title, content, coverUrl, options?}>} articles 文章列表
+   * @returns {{ success, article_id, draft_url, message }}
+   */
+  async saveMultiDraft(articles) {
+    if (!articles.length) return { success: false, article_id: '', draft_url: '', message: '没有文章' };
+    if (articles.length === 1) {
+      const a = articles[0];
+      return this.saveDraft(a.title, a.content, a.coverUrl, a.options || {});
+    }
+
+    if (!this.token) await this.fetchToken();
+    await this.fetchTicket();
+
+    const fingerprint = this.generateFingerprint();
+    const count = articles.length;
+
+    const form = new FormData();
+    // 基础参数
+    form.append('token', this.token);
+    form.append('lang', 'zh_CN');
+    form.append('f', 'json');
+    form.append('ajax', '1');
+    form.append('fingerprint', fingerprint);
+    form.append('random', String(Math.random()));
+    form.append('AppMsgId', '');
+    form.append('count', String(count));
+    form.append('data_seq', 'null');
+    form.append('operate_from', 'Chrome');
+    form.append('isnew', '0');
+    form.append('articlenum', String(count));
+    form.append('save_type', '1');
+    form.append('isneedsave', '0');
+    form.append('is_auto_type_setting', '3');
+    form.append('remind_flag', 'null');
+    form.append('autosave_log', 'true');
+    form.append('pre_timesend_set', '0');
+
+    const idxInfos = [];
+
+    for (let idx = 0; idx < count; idx++) {
+      const a = articles[idx];
+      const opts = a.options || {};
+      const author = opts.author || '叙世阁';
+      const writerId = opts.writerId || '798895707';
+      const claimSourceType = opts.claimSourceType || '4';
+      const claimSource = opts.claimSource || '个人观点，仅供参考';
+      const albumInfo = opts.albumInfo || '{"appmsg_album_infos":[]}';
+
+      // 处理封面图
+      let thumbUrl = '';
+      let thumbFileid = '';
+      if (a.coverUrl && typeof a.coverUrl === 'string') {
+        if (a.coverUrl.startsWith('http')) {
+          thumbUrl = a.coverUrl;
+        } else if (fs.existsSync(a.coverUrl)) {
+          const uploaded = await this.uploadImage(a.coverUrl);
+          thumbUrl = uploaded?.url || '';
+          thumbFileid = uploaded?.fileid || '';
+        }
+      } else if (a.coverUrl && a.coverUrl.url) {
+        thumbUrl = a.coverUrl.url;
+        thumbFileid = a.coverUrl.fileid || '';
+      }
+
+      const i = idx; // field suffix
+      form.append(`title${i}`, a.title);
+      form.append(`content${i}`, a.content);
+      form.append(`author${i}`, author);
+      form.append(`writerid${i}`, writerId);
+      form.append(`fileid${i}`, thumbFileid);
+      form.append(`digest${i}`, '');
+      form.append(`auto_gen_digest${i}`, '1');
+      form.append(`sourceurl${i}`, '');
+      form.append(`cdn_url${i}`, thumbUrl);
+      form.append(`cdn_235_1_url${i}`, '');
+      form.append(`cdn_16_9_url${i}`, '');
+      form.append(`cdn_3_4_url${i}`, '');
+      form.append(`cdn_1_1_url${i}`, '');
+      form.append(`cdn_finder_url${i}`, '');
+      form.append(`cdn_video_url${i}`, '');
+      form.append(`cdn_url_back${i}`, '');
+      form.append(`crop_list${i}`, '');
+      form.append(`show_cover_pic${i}`, thumbUrl ? '1' : '0');
+      form.append(`app_cover_auto${i}`, '0');
+      form.append(`multi_picture_cover${i}`, '0');
+
+      // 评论设置
+      form.append(`need_open_comment${i}`, '1');
+      form.append(`only_fans_can_comment${i}`, '0');
+      form.append(`only_fans_days_can_comment${i}`, '0');
+      form.append(`reply_flag${i}`, '2');
+      form.append(`not_pay_can_comment${i}`, '0');
+      form.append(`auto_elect_comment${i}`, '1');
+      form.append(`auto_elect_reply${i}`, '1');
+      form.append(`option_version${i}`, '5');
+
+      // 版权设置
+      form.append(`copyright_type${i}`, '1');
+      form.append(`is_cartoon_copyright${i}`, '0');
+      form.append(`copyright_img_list${i}`, '{"max_width":586,"img_list":[]}');
+      form.append(`allow_fast_reprint${i}`, '0');
+      form.append(`allow_reprint${i}`, '0');
+      form.append(`allow_reprint_modify${i}`, '0');
+      form.append(`original_article_type${i}`, '');
+      form.append(`ori_white_list${i}`, '{"white_list":[]}');
+
+      // 付费/打赏
+      form.append(`can_reward${i}`, '0');
+      form.append(`pay_gifts_count${i}`, '0');
+      form.append(`reward_reply_id${i}`, '');
+      form.append(`fee${i}`, '0');
+      form.append(`is_pay_subscribe${i}`, '0');
+      form.append(`pay_fee${i}`, '');
+      form.append(`pay_preview_percent${i}`, '');
+      form.append(`pay_desc${i}`, '');
+      form.append(`pay_album_info${i}`, '');
+      form.append(`free_content${i}`, '');
+
+      // 视频/音频相关
+      form.append(`is_finder_video${i}`, '0');
+      form.append(`finder_draft_id${i}`, '0');
+      form.append(`related_video${i}`, '');
+      form.append(`is_video_recommend${i}`, '-1');
+      form.append(`music_id${i}`, '');
+      form.append(`video_id${i}`, '');
+      form.append(`vid_type${i}`, '');
+      form.append(`video_ori_status${i}`, '');
+      form.append(`ad_video_transition${i}`, '');
+
+      // 广告
+      form.append(`insert_ad_mode${i}`, '2');
+      form.append(`can_insert_ad${i}`, '0');
+      form.append(`open_keyword_ad${i}`, '1');
+      form.append(`open_comment_ad${i}`, '1');
+      form.append(`incontent_ad_count${i}`, '0');
+      form.append(`ad_id${i}`, '');
+
+      // 其他设置
+      form.append(`applyori${i}`, '0');
+      form.append(`open_fansmsg${i}`, '0');
+      form.append(`share_page_type${i}`, '0');
+      form.append(`share_imageinfo${i}`, '{"list":[]}');
+      form.append(`share_video_id${i}`, '');
+      form.append(`share_voice_id${i}`, '');
+      form.append(`share_finder_audio_username${i}`, '');
+      form.append(`share_finder_audio_exportid${i}`, '');
+      form.append(`is_share_copyright${i}`, '0');
+      form.append(`share_copyright_url${i}`, '');
+      form.append(`source_article_type${i}`, '');
+      form.append(`reprint_recommend_title${i}`, '');
+      form.append(`reprint_recommend_content${i}`, '');
+      form.append(`hit_nickname${i}`, '');
+      form.append(`last_choose_cover_from${i}`, '0');
+      form.append(`is_user_title${i}`, '');
+      form.append(`platform${i}`, '');
+      form.append(`voteid${i}`, '');
+      form.append(`voteismlt${i}`, '');
+      form.append(`supervoteid${i}`, '');
+      form.append(`super_vote_id${i}`, '');
+      form.append(`guide_words${i}`, '');
+      form.append(`dot${i}`, '{}');
+      form.append(`mmlistenitem_json_buf${i}`, '');
+      form.append(`appmsg_album_info${i}`, albumInfo);
+      form.append(`audio_info${i}`, '{"audio_infos":[]}');
+      form.append(`mp_video_info${i}`, '{"list":{}}');
+      form.append(`categories_list${i}`, '[]');
+      form.append(`compose_info${i}`, '{"list":[]}');
+      form.append(`sections${i}`, '[]');
+      form.append(`danmu_pub_type${i}`, '0');
+      form.append(`appmsg_danmu_pub_type${i}`, '');
+      form.append(`is_set_sync_to_finder${i}`, '0');
+      form.append(`sync_to_finder_cover${i}`, '');
+      form.append(`sync_to_finder_cover_source${i}`, '');
+      form.append(`import_to_finder${i}`, '0');
+      form.append(`import_from_finder_export_id${i}`, '');
+      form.append(`style_type${i}`, '3');
+      form.append(`sticker_info${i}`, '{"is_stickers":0,"common_stickers_num":0,"union_stickers_num":0,"sticker_id_list":[],"has_invalid_sticker":0}');
+      form.append(`new_pic_process${i}`, '0');
+      form.append(`disable_recommend${i}`, '0');
+      form.append(`claim_source_type${i}`, claimSourceType);
+      form.append(`is_user_no_claim_source${i}`, '0');
+      form.append(`msg_index_id${i}`, '');
+      form.append(`convert_to_image_share_page${i}`, '');
+      form.append(`convert_from_image_share_page${i}`, '');
+      form.append(`title_gen_type${i}`, '0');
+
+      idxInfos.push({
+        save_old: 0,
+        cps_info: { cps_import: 0 },
+        red_packet_cover_list: {},
+        claim_source: { claim_source_type: Number(claimSourceType), claim_source: claimSource },
+        line_info: { is_appmsg_flag: 0, scene: 2 },
+        window_product: {},
+        link_info: {},
+        appmsg_link: {},
+        weapp_link: {},
+        yqj_info: {},
+        ai_pic_info: { ai_pic_id: [] },
+        single_video_snap_card: {},
+        product_activity: {},
+        footer_gift_activity: {},
+        footer_common_shops: [],
+        location: {},
+      });
+    }
+
+    form.append('req', JSON.stringify({
+      idx_infos: idxInfos,
+      appmsg_id: 0,
+      is_use_flag: 0,
+      template_version: '82086039',
+    }));
+
+    try {
+      const { data } = await this.client.post(
+        `https://mp.weixin.qq.com/cgi-bin/operate_appmsg?t=ajax-response&sub=create&type=77&token=${this.token}&lang=zh_CN`,
+        form,
+        {
+          headers: form.getHeaders(),
+          timeout: 120000,
+          maxRedirects: 5,
+          validateStatus: s => s < 500,
+        }
+      );
+
+      if (data.base_resp?.ret === 0 && data.appMsgId) {
+        const appmsgId = String(data.appMsgId);
+        console.log(`  多图文草稿保存成功 (appMsgId: ${appmsgId}, ${count} 篇)`);
+        return {
+          success: true,
+          article_id: appmsgId,
+          draft_url: `https://mp.weixin.qq.com/cgi-bin/appmsg?t=media/appmsg_edit_v2&action=edit&type=77&appmsgid=${appmsgId}&token=${this.token}`,
+          message: `已保存 ${count} 篇到同一草稿`,
+        };
+      }
+
+      const msg = data.base_resp?.err_msg || '保存失败';
+      const ret = data.base_resp?.ret || '';
+      console.error(`  多图文草稿保存失败: ${msg} (ret: ${ret})`);
+      return { success: false, article_id: '', draft_url: '', message: `${msg} (ret: ${ret})` };
+    } catch (e) {
+      console.error(`  请求异常: ${e.message}`);
+      return { success: false, article_id: '', draft_url: '', message: e.message };
+    }
+  }
+
+  // ==================== 发布（原有） ====================
+
   async publishArticle(appmsgId) {
     if (!this.token) await this.fetchToken();
 

@@ -26,18 +26,22 @@ const PUBLISH_CONFIG_PATH = path.join(__dirname, '..', 'publish_config.json');
  * 加载所有作品配置
  * 从 publish_config.json 的 wechat 字段读取
  */
-function loadAllWorkConfigs() {
+function loadPublishConfig() {
   if (!fs.existsSync(PUBLISH_CONFIG_PATH)) {
     console.error('未找到 publish_config.json，请先创建配置文件');
-    return {};
+    return null;
   }
   try {
-    const config = JSON.parse(fs.readFileSync(PUBLISH_CONFIG_PATH, 'utf-8'));
-    return config.wechat || {};
+    return JSON.parse(fs.readFileSync(PUBLISH_CONFIG_PATH, 'utf-8'));
   } catch (e) {
     console.error(`publish_config.json 解析失败: ${e.message}`);
-    return {};
+    return null;
   }
+}
+
+function loadAllWorkConfigs() {
+  const config = loadPublishConfig();
+  return config ? (config.wechat || {}) : {};
 }
 
 /**
@@ -442,11 +446,23 @@ program
 
     const totalArticles = worksToGenerate.reduce((sum, w) => sum + w.count, 0);
 
+    // 读取合并配置
+    const publishConfig = loadPublishConfig() || {};
+    const wechatCombine = publishConfig.wechat_combine === true;
+
+    // 合并模式下校验不超过 8 篇
+    const MAX_COMBINE_ARTICLES = 8;
+    if (wechatCombine && totalArticles > MAX_COMBINE_ARTICLES) {
+      console.error(`合并模式下最多 ${MAX_COMBINE_ARTICLES} 篇，当前计划 ${totalArticles} 篇，请减少 count 配置`);
+      return;
+    }
+
     console.log('='.repeat(60));
     console.log('  微信公众号 - AI 直接生成');
     console.log('='.repeat(60));
     worksToGenerate.forEach(w => console.log(`  ${w.name}: ${w.count} 篇`));
     console.log(`  合计: ${totalArticles} 篇`);
+    console.log(`  合并: ${wechatCombine ? '多图文合并' : '逐篇独立草稿'}`);
     console.log(`  间隔: ${opts.interval} 秒`);
     console.log(`  推送: ${opts.push !== false ? '保存到草稿箱' : '仅生成不推送'}`);
     console.log('='.repeat(60));
@@ -466,6 +482,7 @@ program
     let totalSuccess = 0;
     let totalFail = 0;
     const allResults = [];
+    const draftArticles = []; // 收集所有文章，最后合并为一个草稿
 
     for (const { name: workName, config: workConfig, count } of worksToGenerate) {
       console.log(`\n${'#'.repeat(60)}`);
@@ -523,12 +540,6 @@ program
             continue;
           }
 
-          // 间隔等待
-          if (globalIdx > 1) {
-            console.log(`  等待 ${opts.interval} 秒...`);
-            await new Promise(r => setTimeout(r, interval));
-          }
-
           // 2. 追加尾图
           let finalMarkdown = content;
           const tailImage = DEFAULT_TAIL_IMAGE;
@@ -564,24 +575,83 @@ program
           html = await api.processContentImages(html);
           html = html.replace(/<img[^>]+src="(?!https?:\/\/)[^"]*"[^>]*>/gi, () => '');
 
-          // 6. 保存草稿
-          console.log('  保存草稿...');
+          // 6. 收集到待合并列表
           const albumInfo = buildAlbumInfo(workConfig);
-          const result = await api.saveDraft(t.topic, html, coverUrl, { albumInfo });
+          draftArticles.push({
+            title: t.topic,
+            content: html,
+            coverUrl,
+            options: { albumInfo },
+            work: workName,
+          });
+          totalSuccess++;
+          allResults.push({ work: workName, title: t.topic, success: true });
 
-          if (result.success) {
-            totalSuccess++;
-            console.log(`  ✓ 草稿已保存 (ID: ${result.article_id})`);
-            allResults.push({ work: workName, title: t.topic, success: true, article_id: result.article_id, draft_url: result.draft_url });
-          } else {
-            totalFail++;
-            console.error(`  ✗ 草稿保存失败: ${result.message}`);
-            allResults.push({ work: workName, title: t.topic, success: false, message: result.message });
-          }
         } catch (e) {
           totalFail++;
           console.error(`  ✗ 处理失败: ${e.message}`);
           allResults.push({ work: workName, title: t.topic, success: false, message: e.message });
+        }
+      }
+    }
+
+    // 保存草稿
+    if (draftArticles.length > 0 && opts.push !== false) {
+      if (wechatCombine) {
+        // 合并为一个多图文草稿
+        console.log(`\n${'─'.repeat(60)}`);
+        console.log(`  保存多图文草稿（${draftArticles.length} 篇）...`);
+        console.log('─'.repeat(60));
+
+        const result = await api.saveMultiDraft(draftArticles);
+        if (result.success) {
+          console.log(`  ✓ 草稿已保存 (ID: ${result.article_id})`);
+          for (const r of allResults) {
+            if (r.success && !r.skipped) {
+              r.article_id = result.article_id;
+              r.draft_url = result.draft_url;
+            }
+          }
+        } else {
+          console.error(`  ✗ 草稿保存失败: ${result.message}`);
+          for (const r of allResults) {
+            if (r.success && !r.skipped) {
+              r.success = false;
+              r.message = `草稿合并保存失败: ${result.message}`;
+              totalSuccess--;
+              totalFail++;
+            }
+          }
+        }
+      } else {
+        // 逐篇保存独立草稿
+        console.log(`\n${'─'.repeat(60)}`);
+        console.log(`  逐篇保存草稿（${draftArticles.length} 篇）...`);
+        console.log('─'.repeat(60));
+
+        for (let i = 0; i < draftArticles.length; i++) {
+          const da = draftArticles[i];
+          if (i > 0) {
+            console.log(`  等待 ${opts.interval} 秒...`);
+            await new Promise(r => setTimeout(r, interval));
+          }
+          const result = await api.saveDraft(da.title, da.content, da.coverUrl, da.options);
+          const matchResult = allResults.find(r => r.title === da.title && r.success && !r.skipped);
+          if (result.success) {
+            console.log(`  ✓ ${da.title} (ID: ${result.article_id})`);
+            if (matchResult) {
+              matchResult.article_id = result.article_id;
+              matchResult.draft_url = result.draft_url;
+            }
+          } else {
+            console.error(`  ✗ ${da.title}: ${result.message}`);
+            if (matchResult) {
+              matchResult.success = false;
+              matchResult.message = result.message;
+              totalSuccess--;
+              totalFail++;
+            }
+          }
         }
       }
     }

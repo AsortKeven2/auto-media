@@ -126,13 +126,20 @@ async function generateTopics(count = 10, workFilter = null, platform = 'baijiah
 
   const categoryText = buildCategoryPromptSection();
 
-  // 本地随机分配类别，不依赖 AI 选择
+  // 本地随机分配类别，不依赖 AI 选择；同一作品尽量不重复类别
   const categoryNames = platform === 'wechat'
     ? ['数字盘点类', '假设对比类', '细节深挖类']
     : Object.keys(CATEGORIES);
   const assignedCategories = [];
+  // 先打乱类别列表，按顺序分配，用完再重新打乱
+  let shuffled = [...categoryNames].sort(() => Math.random() - 0.5);
+  let shuffleIdx = 0;
   for (let i = 0; i < count; i++) {
-    assignedCategories.push(categoryNames[Math.floor(Math.random() * categoryNames.length)]);
+    if (shuffleIdx >= shuffled.length) {
+      shuffled = [...categoryNames].sort(() => Math.random() - 0.5);
+      shuffleIdx = 0;
+    }
+    assignedCategories.push(shuffled[shuffleIdx++]);
   }
 
   const categoryAssignment = assignedCategories
@@ -242,17 +249,23 @@ ${topicSection}
   try {
     const content = await callLLM(prompt, { maxTokens: 2000 });
     if (!content) {
-      console.error('选题生成失败');
+      console.error(`选题生成失败: ${work} — AI 返回为空`);
       return [];
     }
 
     const jsonMatch = content.match(/\[[\s\S]*\]/);
     if (!jsonMatch) {
-      console.error('AI 返回格式异常');
+      console.error(`选题生成失败: ${work} — AI 返回格式异常，内容: ${content.slice(0, 200)}`);
       return [];
     }
 
-    const topics = JSON.parse(jsonMatch[0]).slice(0, count);
+    let topics;
+    try {
+      topics = JSON.parse(jsonMatch[0]).slice(0, count);
+    } catch (parseErr) {
+      console.error(`选题生成失败: ${work} — JSON 解析失败: ${parseErr.message}，内容: ${jsonMatch[0].slice(0, 200)}`);
+      return [];
+    }
     const results = [];
 
     if (!allHistory[work]) allHistory[work] = [];
@@ -281,7 +294,7 @@ ${topicSection}
     saveHistory(allHistory);
     return results;
   } catch (e) {
-    console.error(`选题生成失败: ${e.message}`);
+    console.error(`选题生成失败: ${work} — ${e.message}`);
     return [];
   }
 }

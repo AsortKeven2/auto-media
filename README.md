@@ -91,8 +91,10 @@ images/
   "platforms": ["baijiahao", "toutiao", "wechat"],
   "publish": false,
   "interval": 30,
+  "wechat_combine": true,
   "wechat": {
     "西游记": {
+      "count": 1,
       "notionUrl": "https://www.notion.so/xxx",
       "album_id": "合集ID",
       "album_title": "合集标题",
@@ -107,7 +109,8 @@ images/
 - `platforms`: 发布平台列表（baijiahao / toutiao / wechat）
 - `publish`: `true`=直接发布，`false`=仅保存草稿
 - `interval`: 每篇发布间隔秒数
-- `wechat`: 微信公众号 Notion 同步配置（可选，用于 `wx:batch`）
+- `wechat_combine`: `true`=多篇文章合并为一个多图文草稿，`false`=逐篇保存独立草稿（微信最多合并 8 篇）
+- `wechat`: 微信公众号配置（可选），每个作品可配置 `count`（AI 生成篇数）、`notionUrl`（Notion 同步）、`album_id`/`album_title`（合集）、`image_dirs`（配图目录）
 
 > **兜底机制**: 如果 `publish_config.json` 不存在，会尝试读取旧的 `batch.json` + `works.json`，都不存在则自动生成默认配置（每作品1篇，仅草稿），新项目可直接运行。
 

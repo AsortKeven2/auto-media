@@ -351,7 +351,8 @@ program
             t.characters,
             imageDir,
             t.category,
-            t.related_works // 传入涉及的作品列表，用于跨作品配图
+            t.related_works,
+            { wordCount: '1500-2000', maxTokens: 4000 }
           );
           const wordCount = content.replace(/\s/g, '').replace(/[#*\-\[\]()]/g, '').length;
           console.log(`  生成完成: ${wordCount} 字`);
