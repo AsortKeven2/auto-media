@@ -127,7 +127,7 @@ program
 
     const topN = parseInt(opts.count);
     console.log(`\n拉取全部文章数据中...`);
-    const { byRead, byRecHighClickRate, byRecLowClickRate } = await api.fetchTopArticles(topN);
+    const { byClickRate, byRecLowClickRate } = await api.fetchTopArticles(topN);
 
     const printList = (list, label) => {
       if (!list.length) { console.log(`\n${label}: 暂无数据`); return; }
@@ -139,8 +139,7 @@ program
       });
     };
 
-    printList(byRead, '阅读量 TOP（综合表现最好）');
-    printList(byRecHighClickRate, '高推荐高点击率（标题好+内容好，值得学习）');
+    printList(byClickRate, '点击率 TOP（标题吸引力最强）');
     printList(byRecLowClickRate, '高推荐低点击率（内容好但标题/封面需优化）');
   });
 
@@ -354,26 +353,23 @@ program
       try {
         console.log('\n  分析热文数据...');
         const bjhApi = new BaijiahaoAPI();
-        const { byRead, byRecHighClickRate, byRecLowClickRate } = await bjhApi.fetchTopArticles(10);
+        const { byClickRate, byRecLowClickRate } = await bjhApi.fetchTopArticles(10);
 
-        // 判断是否有有效数据（阅读或推荐大于0）
-        const hasData = byRead.length > 0 && (byRead[0].read_amount > 0 || byRead[0].rec_amount > 0);
+        // 判断是否有有效数据
+        const hasData = byClickRate.length > 0;
         if (hasData) {
           const formatLine = (a, i) => `${i + 1}. 「${a.title}」 阅读:${a.read_amount} 推荐:${a.rec_amount} 点击率:${a.click_rate}`;
 
           let analysisInput = '';
-          if (byRead.length) {
-            analysisInput += '【阅读量最高的文章】\n' + byRead.map(formatLine).join('\n') + '\n\n';
-          }
-          if (byRecHighClickRate.length) {
-            analysisInput += '【高推荐高点击率（标题好+内容好）】\n' + byRecHighClickRate.map(formatLine).join('\n') + '\n\n';
+          if (byClickRate.length) {
+            analysisInput += '【点击率最高的文章（标题吸引力强）】\n' + byClickRate.map(formatLine).join('\n') + '\n\n';
           }
           if (byRecLowClickRate.length) {
             analysisInput += '【高推荐低点击率（平台认可内容但标题/封面不够吸引人）】\n' + byRecLowClickRate.map(formatLine).join('\n') + '\n\n';
           }
 
           console.log(`  已获取热文数据`);
-          byRead.slice(0, 3).forEach((a, i) => {
+          byClickRate.slice(0, 3).forEach((a, i) => {
             console.log(`    ${i + 1}. ${a.title} (阅读${a.read_amount} 推荐${a.rec_amount} 点击率${a.click_rate})`);
           });
 

@@ -125,7 +125,7 @@ class BaijiahaoAPI {
    * 拉取最近半个月已发布文章，返回格式化的统计数据
    * 接口按时间倒序返回，遇到超过15天前的文章自动停止分页
    * @param {number} topN 每个维度返回的数量
-   * @returns {{ byRead: Array, byRecHighClickRate: Array, byRecLowClickRate: Array }}
+   * @returns {{ byClickRate: Array, byRecLowClickRate: Array }}
    */
   async fetchTopArticles(topN = 10) {
     const allArticles = [];
@@ -201,14 +201,8 @@ class BaijiahaoAPI {
       like_amount: a.like_amount || 0,
     });
 
-    // 按阅读量排序
-    const byRead = [...newsArticles]
-      .sort((a, b) => (b.read_amount || 0) - (a.read_amount || 0))
-      .slice(0, topN)
-      .map(format);
-
-    // 高推荐高点击率（标题好 + 内容好）
-    const byRecHighClickRate = [...newsArticles]
+    // 按点击率排序（阅读量/推荐量），过滤推荐量过低的文章
+    const byClickRate = [...newsArticles]
       .filter(a => (a.rec_amount || 0) >= 10)
       .sort((a, b) => {
         const rateA = (a.read_amount || 0) / (a.rec_amount || 1);
@@ -229,7 +223,7 @@ class BaijiahaoAPI {
       .slice(0, topN)
       .map(format);
 
-    return { byRead, byRecHighClickRate, byRecLowClickRate };
+    return { byClickRate, byRecLowClickRate };
   }
 
   // ==================== 图片上传 ====================
