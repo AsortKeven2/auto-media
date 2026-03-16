@@ -102,7 +102,7 @@ function saveHistory(allHistory) {
 /**
  * 调用 AI 生成选题（按作品独立历史 + 分类别生成）
  */
-async function generateTopics(count = 10, workFilter = null, platform = 'baijiahao') {
+async function generateTopics(count = 10, workFilter = null, platform = 'baijiahao', topArticlesHint = null) {
   const works = listWorks();
   const allHistory = loadPerNovelHistory();
 
@@ -230,9 +230,13 @@ ${sharedTypeDesc}
 
   const topicSection = platform === 'wechat' ? wechatTopicSection : baijiahaoTopicSection;
 
+  const topArticlesSection = topArticlesHint
+    ? `\n【热文参考——你的高阅读量文章规律】\n${topArticlesHint}\n请参考以上规律，让新选题的标题风格和选题方向向高阅读量文章靠拢。\n`
+    : '';
+
   const prompt = `为${platformLabel}生成 ${count} 个关于《${work}》的爆款选题。
 ${historyText}
-
+${topArticlesSection}
 类别说明：
 ${categoryText}
 

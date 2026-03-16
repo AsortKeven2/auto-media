@@ -45,21 +45,43 @@ function mdToHtml(markdown, platform = 'baijiahao') {
       return `<h1 spellcheck="false" class="pgc-h-forward-slash">${content.trim()}</h1>`;
     });
   } else if (platform === 'wechat') {
-    // 微信公众号：标题保持 h2/h3，图片居中
+    const wxHeadStyle = 'font-size: 20px; font-weight: 500; color: rgba(234, 120, 0, 1); line-height: 1.8; margin-bottom: 12px; text-align: center';
+    const wxParaStyle = 'text-align: left; font-size: 17px; font-weight: 400; color: rgba(0,0,0,0.9); line-height: 1.8; margin-bottom: 24px';
+    const wxImgSectionStyle = 'text-align: center; font-size: 17px; font-weight: 400; color: rgba(0,0,0,0.9); line-height: 1.8; margin-bottom: 24px';
+
+    // ## 标题 → <h1> 居中橙色
     html = html.replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, (match, content) => {
-      return `<h2 style="font-weight: bold;">${content.trim()}</h2>`;
+      return `<h1 style="${wxHeadStyle}"><span leaf="">${content.trim()}</span></h1>`;
     });
+    // ### 标题 → <h1> 同样式
     html = html.replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, (match, content) => {
-      return `<h3 style="font-weight: bold;">${content.trim()}</h3>`;
+      return `<h1 style="${wxHeadStyle}"><span leaf="">${content.trim()}</span></h1>`;
     });
-    // 所有段落统一左对齐，避免两端对齐导致的文字间距过大
-    html = html.replace(/<p>/gi, '<p style="text-align: left;">');
-    html = html.replace(/<p\s+style="([^"]*)"/gi, (match, existingStyle) => {
-      if (existingStyle.includes('text-align')) return match;
-      return `<p style="text-align: left; ${existingStyle}"`;
+
+    // 拆分 <p> 中混排的文字和图片（AI 有时没把图片独立成段）
+    html = html.replace(/<p([^>]*)>([\s\S]*?)<\/p>/gi, (match, attrs, inner) => {
+      if (!/<img\s/.test(inner)) return match;
+      const textPart = inner.replace(/<img\s[^>]+>/g, '').trim();
+      const imgMatches = inner.match(/<img\s[^>]+>/g) || [];
+      let result = '';
+      if (textPart) result += `<p style="${wxParaStyle}"><span leaf="">${textPart}</span></p>`;
+      for (const img of imgMatches) {
+        result += `<section style="${wxImgSectionStyle}"><section style="${wxImgSectionStyle}"><span leaf="">${img}</span></section></section>`;
+      }
+      return result;
     });
-    // 图片居中（替换包含图片的整个 <p> 标签，避免嵌套，去除额外间距）
-    html = html.replace(/<p[^>]*>(\s*<img\s+[^>]+>\s*)<\/p>/gi, '<section style="text-align: center; margin: 16px 0;">$1</section>');
+
+    // 图片居中（独立 <p> 中的图片 → 双层 section 嵌套）
+    html = html.replace(/<p[^>]*>(\s*<img\s+[^>]+>\s*)<\/p>/gi, (match, imgTag) => {
+      return `<section style="${wxImgSectionStyle}"><section style="${wxImgSectionStyle}"><span leaf="">${imgTag.trim()}</span></section></section>`;
+    });
+
+    // 所有段落统一样式，内容包裹 <span leaf="">
+    html = html.replace(/<p(?:\s[^>]*)?>([^]*?)<\/p>/gi, (match, inner) => {
+      // 跳过已处理的（含 span leaf）
+      if (inner.includes('span leaf=')) return match;
+      return `<p style="${wxParaStyle}"><span leaf="">${inner}</span></p>`;
+    });
   } else {
     // 百家号：## 加粗，### 转 <p>
     html = html.replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, (match, content) => {

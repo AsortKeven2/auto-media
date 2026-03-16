@@ -17,6 +17,7 @@ const { ToutiaoAPI } = require('./toutiao-api');
 const { WechatAPI } = require('./wechat-api');
 const { fetchNotionPage } = require('./notion-fetcher');
 const { scanImages, selectCoverImage } = require('./image-library');
+const { callLLM } = require('./llm');
 
 // ==================== 缺失图片日志 ====================
 
@@ -108,6 +109,39 @@ program
       const wx = new WechatAPI();
       await wx.checkAuth();
     }
+  });
+
+// ==================== 热文排行 ====================
+
+program
+  .command('top')
+  .description('查看百家号热文排行（按阅读量 + 点击率分析）')
+  .option('-n, --count <n>', '显示数量', '10')
+  .action(async (opts) => {
+    const api = new BaijiahaoAPI();
+    const auth = await api.checkAuth();
+    if (!auth.success) {
+      console.error('未登录，请先设置 Cookie');
+      return;
+    }
+
+    const topN = parseInt(opts.count);
+    console.log(`\n拉取全部文章数据中...`);
+    const { byRead, byRecHighClickRate, byRecLowClickRate } = await api.fetchTopArticles(topN);
+
+    const printList = (list, label) => {
+      if (!list.length) { console.log(`\n${label}: 暂无数据`); return; }
+      console.log(`\n${label}:`);
+      console.log('-'.repeat(70));
+      list.forEach((a, i) => {
+        console.log(`  ${String(i + 1).padStart(2)}. ${a.title}`);
+        console.log(`      阅读: ${a.read_amount}  推荐: ${a.rec_amount}  点击率: ${a.click_rate}`);
+      });
+    };
+
+    printList(byRead, '阅读量 TOP（综合表现最好）');
+    printList(byRecHighClickRate, '高推荐高点击率（标题好+内容好，值得学习）');
+    printList(byRecLowClickRate, '高推荐低点击率（内容好但标题/封面需优化）');
   });
 
 // ==================== 选题 ====================
@@ -314,6 +348,64 @@ program
       }
     }
 
+    // 热文分析（仅百家号平台）
+    let topArticlesHint = null;
+    if (platforms.includes('baijiahao')) {
+      try {
+        console.log('\n  分析热文数据...');
+        const bjhApi = new BaijiahaoAPI();
+        const { byRead, byRecHighClickRate, byRecLowClickRate } = await bjhApi.fetchTopArticles(10);
+
+        // 判断是否有有效数据（阅读或推荐大于0）
+        const hasData = byRead.length > 0 && (byRead[0].read_amount > 0 || byRead[0].rec_amount > 0);
+        if (hasData) {
+          const formatLine = (a, i) => `${i + 1}. 「${a.title}」 阅读:${a.read_amount} 推荐:${a.rec_amount} 点击率:${a.click_rate}`;
+
+          let analysisInput = '';
+          if (byRead.length) {
+            analysisInput += '【阅读量最高的文章】\n' + byRead.map(formatLine).join('\n') + '\n\n';
+          }
+          if (byRecHighClickRate.length) {
+            analysisInput += '【高推荐高点击率（标题好+内容好）】\n' + byRecHighClickRate.map(formatLine).join('\n') + '\n\n';
+          }
+          if (byRecLowClickRate.length) {
+            analysisInput += '【高推荐低点击率（平台认可内容但标题/封面不够吸引人）】\n' + byRecLowClickRate.map(formatLine).join('\n') + '\n\n';
+          }
+
+          console.log(`  已获取热文数据`);
+          byRead.slice(0, 3).forEach((a, i) => {
+            console.log(`    ${i + 1}. ${a.title} (阅读${a.read_amount} 推荐${a.rec_amount} 点击率${a.click_rate})`);
+          });
+
+          topArticlesHint = await callLLM(
+            `分析以下百家号已发布文章的数据，重点关注阅读量和推荐量的关系：
+
+${analysisInput}
+说明：
+- 推荐量高+阅读量高+点击率高 = 标题吸引人，内容也好，是最佳范本
+- 推荐量高+阅读量低+点击率低 = 平台认可内容质量给了推荐，但标题或封面不够吸引人，用户不愿点击
+- 点击率 = 阅读量/推荐量，越高说明标题越能吸引点击
+
+请从以下维度分析（简洁，每点1-2句话）：
+1. 高点击率文章的标题共性（句式、用词、悬念感）
+2. 低点击率文章的标题问题在哪（对比高点击率找差距）
+3. 哪些选题方向/作品/角色更受欢迎
+4. 对后续选题和写作的3条具体建议（重点是如何提高点击率）
+
+直接输出分析，不要超过400字。`,
+            { maxTokens: 600 }
+          );
+          if (topArticlesHint) {
+            console.log('  热文分析完成');
+          }
+        } else {
+          console.log('  文章数据暂无（推荐/阅读均为0），跳过热文分析');
+        }
+      } catch (e) {
+        console.error(`  热文分析失败（不影响生成）: ${e.message}`);
+      }
+    }
+
     let globalIdx = 0;
     let successCount = 0;
     const allResults = [];
@@ -325,7 +417,7 @@ program
       console.log('#'.repeat(60));
 
       // 为该作品生成选题
-      const topics = await generateTopics(count, work);
+      const topics = await generateTopics(count, work, 'baijiahao', topArticlesHint);
       if (!topics.length) {
         console.error(`  ${work}: 选题生成失败`);
         continue;
@@ -352,7 +444,7 @@ program
             imageDir,
             t.category,
             t.related_works,
-            { wordCount: '1500-2000', maxTokens: 4000 }
+            { wordCount: '1500-2000', maxTokens: 4000, topArticlesHint }
           );
           const wordCount = content.replace(/\s/g, '').replace(/[#*\-\[\]()]/g, '').length;
           console.log(`  生成完成: ${wordCount} 字`);

@@ -116,6 +116,10 @@ function buildPrompt(topic, outline, work, imageList, category, opts = {}) {
     outlineSection = `\n大纲（仅供参考，不要机械按章节写）：\n${outlineText}\n`;
   }
 
+  const topArticlesHint = opts.topArticlesHint
+    ? `\n【参考：你的高阅读量文章特征】\n${opts.topArticlesHint}\n在写作时适当借鉴这些特征，但不要生硬模仿。\n`
+    : '';
+
   return `根据以下选题，写一篇百家号文章。
 
 选题：${topic}
@@ -126,6 +130,7 @@ ${outlineSection}
 ${imageList}
 
 ${writingRequirements}
+${topArticlesHint}
 - 每 300 字左右插入一张配图，格式：![配图](名称)，如 ![配图](郭襄)
 - 名称必须从上面的可用配图列表中原样选取（如"郭襄""周瑜""孙悟空"），严禁使用场景描述（如"白衣渡江""水淹七军"），找不到匹配角色宁可不插图
 - 配图选择必须与当前段落讨论的角色相关，不要随便插一个不相关的角色图

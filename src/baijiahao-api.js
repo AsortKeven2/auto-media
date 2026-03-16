@@ -63,6 +63,175 @@ class BaijiahaoAPI {
     }
   }
 
+  // ==================== 文章列表 ====================
+
+  /**
+   * 从文章对象中提取时间戳（毫秒）
+   * @returns {number} 毫秒时间戳，无法解析返回 0
+   */
+  _getArticleTimestamp(article) {
+    const raw = article.publish_time || article.created_at || '';
+    if (!raw) return 0;
+    if (typeof raw === 'number' || /^\d+$/.test(raw)) {
+      const num = Number(raw);
+      return num > 1e12 ? num : num * 1000;
+    }
+    const parsed = new Date(raw).getTime();
+    return isNaN(parsed) ? 0 : parsed;
+  }
+
+  /**
+   * 拉取文章列表（单页）
+   * @param {number} page 页码，从 1 开始
+   * @param {number} pageSize 每页数量，最大 100
+   * @returns {{ list: Array, totalCount: number, totalPage: number }}
+   */
+  async fetchArticleList(page = 1, pageSize = 100) {
+    if (!this.authToken) {
+      await this.fetchAuthToken();
+    }
+
+    const { data } = await this.client.get(
+      'https://baijiahao.baidu.com/pcui/article/lists',
+      {
+        params: {
+          currentPage: page,
+          pageSize,
+          search: '',
+          type: '',
+          collection: '',
+          startDate: '',
+          endDate: '',
+          clearBeforeFetch: false,
+          dynamic: 1,
+        },
+        headers: { token: this.authToken },
+      }
+    );
+
+    if (data.errno !== 0 || !data.data) {
+      throw new Error(`文章列表获取失败: ${data.errmsg || '未知错误'}`);
+    }
+
+    const { list = [], page: pageInfo = {} } = data.data;
+    return {
+      list,
+      totalCount: pageInfo.totalCount || 0,
+      totalPage: pageInfo.totalPage || 0,
+    };
+  }
+
+  /**
+   * 拉取最近半个月已发布文章，返回格式化的统计数据
+   * 接口按时间倒序返回，遇到超过15天前的文章自动停止分页
+   * @param {number} topN 每个维度返回的数量
+   * @returns {{ byRead: Array, byRecHighClickRate: Array, byRecLowClickRate: Array }}
+   */
+  async fetchTopArticles(topN = 10) {
+    const allArticles = [];
+    const pageSize = 20; // 超过20时接口不返回阅读/推荐数据
+    const cutoffTs = Date.now() - 15 * 24 * 60 * 60 * 1000; // 15天前
+
+    // 第一页拿总页数（带重试）
+    let first;
+    for (let retry = 0; retry < 3; retry++) {
+      try {
+        if (retry > 0) await new Promise(r => setTimeout(r, 2000));
+        first = await this.fetchArticleList(1, pageSize);
+        break;
+      } catch (e) {
+        if (retry === 2) throw e;
+        console.error(`  第 1 页拉取失败，${retry + 1}/3 次重试...`);
+      }
+    }
+    allArticles.push(...first.list);
+    const totalPage = first.totalPage;
+
+    // 拉取剩余页（间隔 1s 避免限流，失败重试 1 次）
+    let reachedCutoff = false;
+    for (let p = 2; p <= totalPage; p++) {
+      if (reachedCutoff) break;
+      let list = null;
+      for (let retry = 0; retry < 2; retry++) {
+        try {
+          await new Promise(r => setTimeout(r, 1000));
+          const result = await this.fetchArticleList(p, pageSize);
+          list = result.list;
+          break;
+        } catch (e) {
+          if (retry === 0) {
+            console.error(`  第 ${p} 页拉取失败，重试中...`);
+          } else {
+            console.error(`  第 ${p} 页拉取失败: ${e.message}，停止翻页`);
+          }
+        }
+      }
+      if (!list) break;
+      for (const item of list) {
+        allArticles.push(item);
+      }
+      // 检查本页最后一条是否已超过截止日期
+      if (list.length > 0) {
+        const last = list[list.length - 1];
+        const ts = this._getArticleTimestamp(last);
+        if (ts > 0 && ts < cutoffTs) {
+          reachedCutoff = true;
+        }
+      }
+    }
+
+    // 按时间过滤：只保留最近15天
+    const filtered = allArticles.filter(a => {
+      const ts = this._getArticleTimestamp(a);
+      return ts === 0 || ts >= cutoffTs; // ts=0 说明无法解析，保留
+    });
+
+    // 过滤视频，只保留已发布图文
+    const newsArticles = filtered.filter(a => a.type === 'news' && a.status === 'publish');
+    console.log(`  共拉取 ${allArticles.length} 篇，最近15天 ${filtered.length} 篇，图文 ${newsArticles.length} 篇`);
+
+    const format = a => ({
+      title: a.title,
+      article_id: a.article_id || a.id,
+      read_amount: a.read_amount || 0,
+      rec_amount: a.rec_amount || 0,
+      click_rate: (a.rec_amount > 0) ? ((a.read_amount || 0) / a.rec_amount * 100).toFixed(1) + '%' : '0%',
+      comment_amount: a.comment_amount || 0,
+      share_amount: a.share_amount || 0,
+      like_amount: a.like_amount || 0,
+    });
+
+    // 按阅读量排序
+    const byRead = [...newsArticles]
+      .sort((a, b) => (b.read_amount || 0) - (a.read_amount || 0))
+      .slice(0, topN)
+      .map(format);
+
+    // 高推荐高点击率（标题好 + 内容好）
+    const byRecHighClickRate = [...newsArticles]
+      .filter(a => (a.rec_amount || 0) >= 10)
+      .sort((a, b) => {
+        const rateA = (a.read_amount || 0) / (a.rec_amount || 1);
+        const rateB = (b.read_amount || 0) / (b.rec_amount || 1);
+        return rateB - rateA;
+      })
+      .slice(0, topN)
+      .map(format);
+
+    // 高推荐低点击率（内容被平台认可但标题/封面不够吸引人）
+    const byRecLowClickRate = [...newsArticles]
+      .filter(a => (a.rec_amount || 0) >= 50)
+      .sort((a, b) => {
+        const rateA = (a.read_amount || 0) / (a.rec_amount || 1);
+        const rateB = (b.read_amount || 0) / (b.rec_amount || 1);
+        return rateA - rateB;
+      })
+      .slice(0, topN)
+      .map(format);
+
+    return { byRead, byRecHighClickRate, byRecLowClickRate };
+  }
+
   // ==================== 图片上传 ====================
 
   async uploadImage(imagePath) {

@@ -190,6 +190,164 @@ class WechatAPI {
 
   // ==================== 草稿管理 ====================
 
+  // ==================== 文章统计 ====================
+
+  /**
+   * 拉取群发文章列表（单页，包含阅读/点赞等统计数据）
+   * @param {number} begin 起始偏移（offset 分页）
+   * @param {number} count 每页数量（最大10）
+   * @returns {{ list: Array, totalCount: number }}
+   */
+  async fetchSentList(begin = 0, count = 10) {
+    if (!this.token) await this.fetchToken();
+
+    const { data } = await this.client.get(
+      `https://mp.weixin.qq.com/cgi-bin/newmasssendpage`,
+      {
+        params: {
+          begin,
+          count,
+          begin_send_time: 0,
+          need_stat: 1,
+          token: this.token,
+          lang: 'zh_CN',
+          f: 'json',
+          ajax: 1,
+        },
+        maxRedirects: 5,
+        validateStatus: s => s < 500,
+      }
+    );
+
+    if (data.base_resp?.ret !== 0) {
+      throw new Error(`群发列表获取失败: ${data.base_resp?.err_msg || '未知错误'}`);
+    }
+
+    return {
+      list: data.sent_list || [],
+      totalCount: data.total_count || 0,
+    };
+  }
+
+  /**
+   * 拉取最近一周文章数据并更新本地缓存，返回最近15天 top N（按阅读量）
+   * 缓存路径：data/wx_articles_cache.json
+   * @param {number} topN 返回数量
+   * @returns {{ byRead: Array }}
+   */
+  async fetchTopArticles(topN = 10) {
+    const cacheDir = path.join(__dirname, '..', 'data');
+    const cachePath = path.join(cacheDir, 'wx_articles_cache.json');
+
+    // 读取现有缓存
+    let cached = [];
+    if (fs.existsSync(cachePath)) {
+      try { cached = JSON.parse(fs.readFileSync(cachePath, 'utf-8')); } catch {}
+    }
+
+    // 拉取最近一周的新数据
+    const oneWeekAgo = Date.now() / 1000 - 7 * 24 * 60 * 60;
+    const freshArticles = [];
+    const pageSize = 10;
+
+    let first;
+    for (let retry = 0; retry < 3; retry++) {
+      try {
+        if (retry > 0) await new Promise(r => setTimeout(r, 2000));
+        first = await this.fetchSentList(0, pageSize);
+        break;
+      } catch (e) {
+        if (retry === 2) throw e;
+        console.error(`  第 1 页拉取失败，${retry + 1}/3 次重试...`);
+      }
+    }
+
+    this._extractArticles(first.list, freshArticles);
+    const totalCount = first.totalCount;
+
+    let reachedCutoff = false;
+    for (let begin = pageSize; begin < totalCount; begin += pageSize) {
+      if (reachedCutoff) break;
+      let list = null;
+      for (let retry = 0; retry < 2; retry++) {
+        try {
+          await new Promise(r => setTimeout(r, 1000));
+          const result = await this.fetchSentList(begin, pageSize);
+          list = result.list;
+          break;
+        } catch (e) {
+          if (retry === 0) console.error(`  偏移${begin} 拉取失败，重试中...`);
+          else console.error(`  偏移${begin} 拉取失败: ${e.message}，停止翻页`);
+        }
+      }
+      if (!list) break;
+      this._extractArticles(list, freshArticles);
+
+      // 超过一周就停
+      if (list.length > 0) {
+        const lastTime = list[list.length - 1].sent_info?.time || 0;
+        if (lastTime > 0 && lastTime < oneWeekAgo) reachedCutoff = true;
+      }
+    }
+
+    // 合并缓存：用新数据覆盖同标题+同时间的旧数据，去重
+    const keyOf = a => `${a.title}|${a.send_time}`;
+    const merged = new Map();
+    for (const a of cached) merged.set(keyOf(a), a);
+    for (const a of freshArticles) merged.set(keyOf(a), a); // 新数据覆盖旧数据
+
+    // 只保留最近30天的缓存（避免无限增长）
+    const thirtyDaysAgo = Date.now() / 1000 - 30 * 24 * 60 * 60;
+    const allCached = [...merged.values()].filter(a => a.send_time === 0 || a.send_time >= thirtyDaysAgo);
+
+    // 写入缓存
+    if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
+    fs.writeFileSync(cachePath, JSON.stringify(allCached, null, 2), 'utf-8');
+
+    // 分析用最近15天
+    const fifteenDaysAgo = Date.now() / 1000 - 15 * 24 * 60 * 60;
+    const recent = allCached.filter(a => a.send_time === 0 || a.send_time >= fifteenDaysAgo);
+    console.log(`  本次拉取 ${freshArticles.length} 篇，缓存 ${allCached.length} 篇，最近15天 ${recent.length} 篇`);
+
+    const format = a => ({
+      title: a.title,
+      read_num: a.read_num || 0,
+      like_num: a.like_num || 0,
+      share_num: a.share_num || 0,
+      comment_num: a.comment_num || 0,
+      send_time: a.send_time || 0,
+    });
+
+    const byRead = [...recent]
+      .sort((a, b) => (b.read_num || 0) - (a.read_num || 0))
+      .slice(0, topN)
+      .map(format);
+
+    return { byRead };
+  }
+
+  /**
+   * 从群发列表项中提取单篇文章数据
+   */
+  _extractArticles(sentList, target) {
+    for (const item of sentList) {
+      const sendTime = item.sent_info?.time || 0;
+      const articles = item.appmsg_info || [];
+      for (const a of articles) {
+        target.push({
+          title: a.title || '',
+          read_num: a.read_num || 0,
+          like_num: a.like_num || 0,
+          share_num: a.share_num || 0,
+          comment_num: a.comment_num || 0,
+          send_time: sendTime,
+        });
+      }
+    }
+  }
+
+  // ==================== 草稿列表 ====================
+
   /**
    * 列出草稿箱中的所有草稿
    * @returns {{ list: { app_id: string, title: string, update_time: number }[], total: number }}

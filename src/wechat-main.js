@@ -413,6 +413,7 @@ program
   .description('AI 直接生成文章 → 推送到公众号草稿箱（按 wechat 配置的 count）')
   .argument('[work]', '作品名称，不传则处理所有 count > 0 的作品')
   .option('--interval <seconds>', '每篇文章之间的间隔秒数', '15')
+  .option('--rounds <n>', '执行轮次（每轮按配置生成一批文章）', '1')
   .option('--no-push', '仅生成文章，不推送到草稿箱')
   .action(async (work, opts) => {
     const allConfigs = loadAllWorkConfigs();
@@ -457,11 +458,14 @@ program
       return;
     }
 
+    const rounds = parseInt(opts.rounds) || 1;
+
     console.log('='.repeat(60));
     console.log('  微信公众号 - AI 直接生成');
     console.log('='.repeat(60));
     worksToGenerate.forEach(w => console.log(`  ${w.name}: ${w.count} 篇`));
-    console.log(`  合计: ${totalArticles} 篇`);
+    console.log(`  合计: ${totalArticles} 篇/轮`);
+    if (rounds > 1) console.log(`  轮次: ${rounds} 轮（共 ${totalArticles * rounds} 篇）`);
     console.log(`  合并: ${wechatCombine ? '多图文合并' : '逐篇独立草稿'}`);
     console.log(`  间隔: ${opts.interval} 秒`);
     console.log(`  推送: ${opts.push !== false ? '保存到草稿箱' : '仅生成不推送'}`);
@@ -478,6 +482,56 @@ program
       }
     }
 
+    // 热文分析
+    let topArticlesHint = null;
+    try {
+      console.log('\n  分析热文数据...');
+      const wxApi = api || new WechatAPI();
+      if (!api) await wxApi.fetchToken();
+      const { byRead } = await wxApi.fetchTopArticles(10);
+
+      const hasData = byRead.length > 0 && byRead[0].read_num > 0;
+      if (hasData) {
+        const formatLine = (a, i) => `${i + 1}. 「${a.title}」 阅读:${a.read_num} 点赞:${a.like_num} 分享:${a.share_num} 评论:${a.comment_num}`;
+        const analysisInput = '【阅读量最高的文章】\n' + byRead.map(formatLine).join('\n');
+
+        console.log(`  已获取热文数据`);
+        byRead.slice(0, 3).forEach((a, i) => {
+          console.log(`    ${i + 1}. ${a.title} (阅读${a.read_num} 点赞${a.like_num})`);
+        });
+
+        topArticlesHint = await callLLM(
+          `分析以下微信公众号已发布文章的数据：
+
+${analysisInput}
+
+请从以下维度分析（简洁，每点1-2句话）：
+1. 高阅读量文章的标题共性（句式、用词、悬念感）
+2. 低阅读量文章的标题问题在哪
+3. 哪些选题方向/作品/角色更受欢迎
+4. 对后续选题和写作的3条具体建议
+
+直接输出分析，不要超过400字。`,
+          { maxTokens: 600 }
+        );
+        if (topArticlesHint) {
+          console.log('  热文分析完成');
+        }
+      } else {
+        console.log('  文章数据暂无（阅读均为0），跳过热文分析');
+      }
+    } catch (e) {
+      console.error(`  热文分析失败（不影响生成）: ${e.message}`);
+    }
+
+    let grandTotalSuccess = 0;
+    let grandTotalFail = 0;
+
+    for (let round = 0; round < rounds; round++) {
+    if (rounds > 1) {
+      console.log(`\n${'▶'.repeat(3)} 第 ${round + 1}/${rounds} 轮`);
+    }
+
     let globalIdx = 0;
     let totalSuccess = 0;
     let totalFail = 0;
@@ -490,7 +544,7 @@ program
       console.log('#'.repeat(60));
 
       // 生成选题
-      const topics = await generateTopics(count, workName, 'wechat');
+      const topics = await generateTopics(count, workName, 'wechat', topArticlesHint);
       if (!topics.length) {
         console.error(`  ${workName}: 选题生成失败`);
         totalFail += count;
@@ -519,7 +573,7 @@ program
             imageDir,
             t.category,
             t.related_works,
-            { wordCount: '2500-3500', maxTokens: 10000 }
+            { wordCount: '2500-3500', maxTokens: 10000, topArticlesHint }
           );
           const wordCount = content.replace(/\s/g, '').replace(/[#*\-\[\]()]/g, '').length;
           console.log(`  生成完成: ${wordCount} 字`);
@@ -658,7 +712,7 @@ program
 
     // 汇总
     console.log(`\n${'='.repeat(60)}`);
-    console.log('  生成完成');
+    console.log(`  ${rounds > 1 ? `第 ${round + 1} 轮` : ''}生成完成`);
     console.log('='.repeat(60));
     console.log(`  计划: ${totalArticles} 篇 | 成功: ${totalSuccess} 篇 | 失败: ${totalFail} 篇`);
     if (worksToGenerate.length > 1) {
@@ -677,6 +731,16 @@ program
         if (r.draft_url) console.log(`      ${r.draft_url}`);
         if (!r.success && r.message) console.log(`      ${r.message}`);
       });
+    }
+
+    grandTotalSuccess += totalSuccess;
+    grandTotalFail += totalFail;
+    } // end rounds loop
+
+    if (rounds > 1) {
+      console.log(`\n${'='.repeat(60)}`);
+      console.log(`  全部 ${rounds} 轮完成: 成功 ${grandTotalSuccess} 篇 | 失败 ${grandTotalFail} 篇`);
+      console.log('='.repeat(60));
     }
   });
 
@@ -740,6 +804,36 @@ program
       console.log(`  全部完成: 成功 ${totalSuccess} 篇 | 失败 ${totalFail} 篇`);
       console.log('='.repeat(50));
     }
+  });
+
+// ==================== 热文排行 ====================
+
+program
+  .command('top')
+  .description('查看公众号热文排行（按阅读量）')
+  .option('-n, --count <n>', '显示数量', '10')
+  .action(async (opts) => {
+    const api = new WechatAPI();
+    const auth = await api.checkAuth();
+    if (!auth.success) {
+      console.error('公众号未登录');
+      return;
+    }
+
+    const topN = parseInt(opts.count);
+    console.log(`\n拉取文章数据中...`);
+    const { byRead } = await api.fetchTopArticles(topN);
+
+    if (!byRead.length) {
+      console.log('暂无数据');
+      return;
+    }
+    console.log(`\n阅读量 TOP ${topN}:`);
+    console.log('-'.repeat(70));
+    byRead.forEach((a, i) => {
+      console.log(`  ${String(i + 1).padStart(2)}. ${a.title}`);
+      console.log(`      阅读: ${a.read_num}  点赞: ${a.like_num}  分享: ${a.share_num}  评论: ${a.comment_num}`);
+    });
   });
 
 // ==================== 列出草稿 ====================
