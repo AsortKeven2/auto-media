@@ -180,7 +180,6 @@ node src/wechat-main.js top -n 20              # 显示前20
 # 从 Notion 同步到公众号草稿箱
 node src/wechat-main.js batch             # 同步所有作品
 node src/wechat-main.js batch 西游记       # 同步指定作品
-node src/wechat-main.js batch --force      # 强制重新同步
 
 # 列出草稿
 node src/wechat-main.js list

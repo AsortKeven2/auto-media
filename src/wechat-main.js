@@ -227,32 +227,7 @@ async function syncOneWork(api, workName, workConfig, opts) {
     return { success: 0, fail: 0 };
   }
 
-  // 2. --force 模式：删除该作品已同步的草稿
-  const syncState = loadSyncState();
-  const childPageIds = new Set(childPages.map(p => p.id));
-  if (opts.force) {
-    const draftsToDelete = Object.entries(syncState)
-      .filter(([pageId, s]) => childPageIds.has(pageId) && s.article_id);
-    if (draftsToDelete.length) {
-      console.log(`\n删除 ${workName} 已同步的 ${draftsToDelete.length} 篇草稿...`);
-      for (const [pageId, draft] of draftsToDelete) {
-        try {
-          const del = await api.deleteDraft(draft.article_id);
-          if (del.success) {
-            console.log(`  ✓ 已删除: ${draft.title} (${draft.article_id})`);
-            delete syncState[pageId];
-          } else {
-            console.log(`  ⚠ 删除失败: ${draft.title} - ${del.message}`);
-          }
-        } catch (e) {
-          console.log(`  ⚠ 删除异常: ${draft.title} - ${e.message}`);
-        }
-      }
-      saveSyncState(syncState);
-    }
-  }
-
-  // 3. 过滤已处理的页面
+  // 2. 过滤已处理的页面
   const currentState = loadSyncState();
   const total = childPages.length;
   const synced = [];
@@ -332,7 +307,7 @@ async function syncOneWork(api, workName, workConfig, opts) {
       const coverResult = selectCoverImage({
         title,
         imageDir: opts.images ? path.resolve(opts.images) : DEFAULT_IMAGE_DIR,
-        workFilter: workConfig.work || undefined,
+        workFilter: workName,
         articleImagePaths: imagePaths,
       });
 
@@ -752,7 +727,6 @@ program
   .argument('[work]', '作品名称，不传则同步所有已配置 notionUrl 的作品')
   .option('--interval <seconds>', '每篇文章之间的间隔秒数', '15')
   .option('--no-auto-images', '不自动配图')
-  .option('--force', '强制重新处理所有页面（删除已同步草稿并重新同步）')
   .action(async (work, opts) => {
     const allConfigs = loadAllWorkConfigs();
 
