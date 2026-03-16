@@ -11,7 +11,8 @@
 - **智能配图** — AI 自主决定插图位置和角色，自动匹配本地图片库
 - **多平台发布** — 支持百家号、头条号、微信公众号
 - **批量生产** — 按配置文件批量生成 + 发布，一键完成
-- **微信公众号** — 支持 AI 直接生成或从 Notion 同步文章，推送到草稿箱
+- **热文分析** — 自动拉取已发布文章数据，LLM 分析高阅读量规律，反哺选题和写作
+- **微信公众号** — 支持 AI 直接生成或从 Notion 同步文章，推送到草稿箱，支持多轮批量生成
 
 ## 快速开始
 
@@ -141,6 +142,10 @@ node src/main.js outline "孙悟空大闹天宫，真的是故意留手吗？"
 node src/main.js push articles/xxx.md
 node src/main.js push articles/xxx.md -p wechat    # 推送到公众号
 
+# 热文排行（百家号）
+node src/main.js top                   # 查看阅读量/点击率排行
+node src/main.js top -n 20             # 显示前20
+
 # 批量生成 + 发布
 node src/main.js batch                # 按 publish_config.json 配置执行
 node src/main.js batch --no-push      # 仅生成不推送
@@ -153,6 +158,20 @@ node src/main.js batch --interval 60  # 自定义间隔秒数（覆盖配置）
 # 推送所有 ready 状态文章
 node src/main.js push-ready --publish
 node src/main.js push-ready -p wechat     # 仅推送到公众号
+```
+
+### 微信公众号 AI 生成
+
+```bash
+# AI 直接生成文章 → 推送到草稿箱
+node src/wechat-main.js generate               # 按配置生成所有作品
+node src/wechat-main.js generate 西游记         # 仅生成指定作品
+node src/wechat-main.js generate --no-push     # 仅生成不推送
+node src/wechat-main.js generate --rounds 3    # 执行3轮（批量生成多天文章）
+
+# 热文排行（公众号）
+node src/wechat-main.js top                    # 查看阅读量排行
+node src/wechat-main.js top -n 20              # 显示前20
 ```
 
 ### 微信公众号 Notion 同步
@@ -182,6 +201,13 @@ npm run wx:batch       # 微信公众号批量同步
 npm run wx:list        # 列出公众号草稿
 npm run help           # 显示所有命令
 ```
+
+### 热文分析
+
+批量生成时（`batch` / `generate`）会自动拉取已发布文章的阅读数据，通过 LLM 分析高阅读量文章的标题和选题规律，将分析结果注入到选题和写作提示词中，提升内容质量。
+
+- **百家号**: 拉取最近15天文章，分析阅读量、推荐量、点击率
+- **微信公众号**: 拉取最近一周文章并缓存到本地（`data/wx_articles_cache.json`），分析最近15天阅读量数据
 
 ### 图片素材管理
 
