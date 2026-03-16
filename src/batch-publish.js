@@ -45,17 +45,18 @@ function mdToHtml(markdown, platform = 'baijiahao') {
       return `<h1 spellcheck="false" class="pgc-h-forward-slash">${content.trim()}</h1>`;
     });
   } else if (platform === 'wechat') {
+    // 微信公众号后台会清洗 <h1>~<h6> 的 inline style，用 <section> 模拟标题
     const wxHeadStyle = 'font-size: 20px; font-weight: 500; color: rgba(234, 120, 0, 1); line-height: 1.8; margin-bottom: 12px; text-align: center';
     const wxParaStyle = 'text-align: left; font-size: 17px; font-weight: 400; color: rgba(0,0,0,0.9); line-height: 1.8; margin-bottom: 24px';
     const wxImgSectionStyle = 'text-align: center; font-size: 17px; font-weight: 400; color: rgba(0,0,0,0.9); line-height: 1.8; margin-bottom: 24px';
 
-    // ## 标题 → <h1> 居中橙色
+    // ## 标题 → <section> 居中橙色
     html = html.replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, (match, content) => {
-      return `<h1 style="${wxHeadStyle}"><span leaf="">${content.trim()}</span></h1>`;
+      return `<section style="${wxHeadStyle}"><span leaf="">${content.trim()}</span></section>`;
     });
-    // ### 标题 → <h1> 同样式
+    // ### 标题 → <section> 同样式
     html = html.replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, (match, content) => {
-      return `<h1 style="${wxHeadStyle}"><span leaf="">${content.trim()}</span></h1>`;
+      return `<section style="${wxHeadStyle}"><span leaf="">${content.trim()}</span></section>`;
     });
 
     // 拆分 <p> 中混排的文字和图片（AI 有时没把图片独立成段）
