@@ -186,9 +186,9 @@ class BaijiahaoAPI {
       return ts === 0 || ts >= cutoffTs; // ts=0 说明无法解析，保留
     });
 
-    // 过滤视频，只保留已发布图文
-    const newsArticles = filtered.filter(a => a.type === 'news' && a.status === 'publish');
-    console.log(`  共拉取 ${allArticles.length} 篇，最近15天 ${filtered.length} 篇，图文 ${newsArticles.length} 篇`);
+    // 过滤视频，只保留已发布图文；阅读量低于200的不参与分析
+    const newsArticles = filtered.filter(a => a.type === 'news' && a.status === 'publish' && (a.read_amount || 0) >= 200);
+    console.log(`  共拉取 ${allArticles.length} 篇，最近15天 ${filtered.length} 篇，图文(阅读≥200) ${newsArticles.length} 篇`);
 
     const format = a => ({
       title: a.title,

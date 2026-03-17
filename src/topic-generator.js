@@ -118,8 +118,8 @@ async function generateTopics(count = 10, workFilter = null, platform = 'baijiah
 
   const work = allWorks[Math.floor(Math.random() * allWorks.length)];
 
-  // 只取当前作品的历史，上限 200 条
-  const novelHistory = (allHistory[work] || []).slice(-200);
+  // 只取当前作品最近 50 条历史用于去重
+  const novelHistory = (allHistory[work] || []).slice(-50);
   const historyText = novelHistory.length
     ? '\n已有选题（请勿重复或相似）：\n' + novelHistory.map(t => `- ${t}`).join('\n')
     : '';

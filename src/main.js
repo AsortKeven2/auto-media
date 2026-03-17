@@ -412,8 +412,13 @@ ${analysisInput}
       console.log(`  ${work} — 计划 ${count} 篇`);
       console.log('#'.repeat(60));
 
-      // 为该作品生成选题
-      const topics = await generateTopics(count, work, 'baijiahao', topArticlesHint);
+      // 为该作品生成选题（不足时重试一次补齐）
+      let topics = await generateTopics(count, work, 'baijiahao', topArticlesHint);
+      if (topics.length < count && topics.length > 0) {
+        console.log(`  选题不足 ${topics.length}/${count}，补充生成中...`);
+        const extra = await generateTopics(count - topics.length, work, 'baijiahao', topArticlesHint);
+        topics = topics.concat(extra);
+      }
       if (!topics.length) {
         console.error(`  ${work}: 选题生成失败`);
         continue;
