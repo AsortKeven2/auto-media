@@ -22,7 +22,13 @@ const DEFAULT_TAIL_IMAGE = env.tailImage();
  * Markdown 转 HTML（支持多平台）
  */
 function mdToHtml(markdown, platform = 'baijiahao') {
-  let html = marked(markdown);
+  // AI 有时把小标题写成 **粗体** 而非 ## 标题，统一修正
+  // 匹配前面是空行（或文件开头）、独占一行的 **...** → ## 标题
+  let md = markdown.replace(/(^|\n\n)\*\*([^\n*]+?)\*\*[ \t]*\n/g, (match, before, content) => {
+    return `${before}## ${content}\n`;
+  });
+
+  let html = marked(md);
 
   if (platform === 'toutiao') {
     html = ToutiaoAPI.cleanHtml(html);
