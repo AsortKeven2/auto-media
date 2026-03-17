@@ -28,7 +28,7 @@ async function callLLM(prompt, options = {}) {
             'Authorization': `Bearer ${apiKey}`,
             'Content-Type': 'application/json',
           },
-          timeout: 120000,
+          timeout: 180000,
         }
       );
       const content = data.choices?.[0]?.message?.content || '';
@@ -36,9 +36,11 @@ async function callLLM(prompt, options = {}) {
       return null;
     } catch (e) {
       const status = e.response?.status;
-      if (status === 429 && attempt < retries) {
-        const delay = attempt * 10;
-        console.warn(`  ⚠ API 限流(429)，${delay}s 后重试 (${attempt}/${retries})`);
+      const isTimeout = e.code === 'ECONNABORTED' || e.code === 'ETIMEDOUT';
+      if ((status === 429 || isTimeout) && attempt < retries) {
+        const delay = isTimeout ? attempt * 15 : attempt * 10;
+        const reason = isTimeout ? '超时' : '限流(429)';
+        console.warn(`  ⚠ API ${reason}，${delay}s 后重试 (${attempt}/${retries})`);
         await new Promise(r => setTimeout(r, delay * 1000));
         continue;
       }

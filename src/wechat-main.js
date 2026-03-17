@@ -523,6 +523,9 @@ ${analysisInput}
       if (!topics.length) {
         console.error(`  ${workName}: 选题生成失败`);
         totalFail += count;
+        for (let k = 0; k < count; k++) {
+          allResults.push({ work: workName, title: null, success: false, message: '选题生成失败' });
+        }
         continue;
       }
       console.log(`  生成了 ${topics.length} 个选题`);
@@ -619,7 +622,88 @@ ${analysisInput}
         } catch (e) {
           totalFail++;
           console.error(`  ✗ 处理失败: ${e.message}`);
-          allResults.push({ work: workName, title: t.topic, success: false, message: e.message });
+          allResults.push({ work: workName, title: t.topic, success: false, message: e.message, _topicObj: t });
+        }
+      }
+    }
+
+    // ── 失败补偿：对本轮失败的文章重新生成一次 ──
+    const failedItems = allResults.filter(r => !r.success);
+    if (failedItems.length > 0) {
+      console.log(`\n${'─'.repeat(60)}`);
+      console.log(`  补偿重试：${failedItems.length} 篇失败文章`);
+      console.log('─'.repeat(60));
+
+      for (const failedItem of failedItems) {
+        const workName = failedItem.work;
+        const workEntry = worksToGenerate.find(w => w.name === workName);
+        if (!workEntry) continue;
+        const workConfig = workEntry.config;
+        const allowedGroups = workConfig.image_dirs || [workName];
+
+        console.log(`\n  ▷ 补偿 [${workName}] ${failedItem.title || '(选题失败)'}`);
+
+        try {
+          // 如果原来就是选题失败，重新生成选题
+          let topic = failedItem._topicObj;
+          if (!topic) {
+            console.log('  重新生成选题...');
+            const retryTopics = await generateTopics(1, workName, 'wechat', topArticlesHint);
+            if (!retryTopics.length) {
+              console.error(`  ✗ 补偿选题仍然失败: ${workName}`);
+              continue;
+            }
+            topic = retryTopics[0];
+            console.log(`  新选题: [${topic.category}] ${topic.topic}`);
+          }
+
+          console.log('  AI 写作中...');
+          const { article: content, imageStats } = await generateArticle(
+            topic.topic, null, topic.work, topic.characters,
+            imageDir, topic.category, topic.related_works,
+            { wordCount: '2500-3500', maxTokens: 10000, topArticlesHint }
+          );
+          const wordCount = content.replace(/\s/g, '').replace(/[#*\-\[\]()]/g, '').length;
+          console.log(`  生成完成: ${wordCount} 字`);
+          if (imageStats.matched.length) console.log(`  配图: ${imageStats.matched.length} 张匹配`);
+
+          saveArticleArchive(topic.topic, content, WX_GENERATED_DIR);
+
+          if (opts.push !== false) {
+            let finalMarkdown = content;
+            const tailImage = DEFAULT_TAIL_IMAGE;
+            if (tailImage && fs.existsSync(tailImage)) {
+              finalMarkdown += `\n\n![尾图](${tailImage})\n`;
+            }
+            let html = mdToHtml(finalMarkdown, 'wechat');
+            const imagePaths = extractImagePaths(finalMarkdown);
+            let coverUrl = null;
+            const coverResult = selectCoverImage({
+              title: topic.topic, imageDir, workFilter: workName, articleImagePaths: imagePaths,
+            });
+            if (coverResult.coverPath) {
+              const uploaded = await api.uploadImage(coverResult.coverPath);
+              coverUrl = uploaded?.url || null;
+            }
+            html = await api.processContentImages(html);
+            html = html.replace(/<img[^>]+src="(?!https?:\/\/)[^"]*"[^>]*>/gi, () => '');
+
+            const albumInfo = buildAlbumInfo(workConfig);
+            draftArticles.push({
+              title: topic.topic, content: html, coverUrl,
+              options: { albumInfo }, work: workName,
+            });
+          }
+
+          // 更新结果记录
+          failedItem.success = true;
+          failedItem.title = topic.topic;
+          failedItem.message = undefined;
+          totalSuccess++;
+          totalFail--;
+          console.log(`  ✓ 补偿成功: ${topic.topic}`);
+        } catch (e) {
+          console.error(`  ✗ 补偿仍然失败: ${e.message}`);
         }
       }
     }
