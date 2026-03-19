@@ -86,24 +86,25 @@ function selectCoverImage(options = {}) {
 
   const TARGET_RATIO = 3 / 2;
 
-  // 从候选图片中选比例最接近 3:2 的
+  // 从候选图片中选比例接近 3:2 的，在可接受范围内随机选一张
   function pickBestRatio(candidates) {
-    let best = null;
-    let bestDiff = Infinity;
+    const ACCEPTABLE_DIFF = 0.3; // 比例差在此范围内均可接受
+    const scored = [];
     for (const imgPath of candidates) {
       try {
         const buf = fs.readFileSync(imgPath);
         const dim = imageSize(buf);
         if (dim.width && dim.height) {
           const diff = Math.abs(dim.width / dim.height - TARGET_RATIO);
-          if (diff < bestDiff) {
-            bestDiff = diff;
-            best = imgPath;
-          }
+          scored.push({ imgPath, diff });
         }
       } catch {}
     }
-    return best;
+    if (scored.length === 0) return null;
+    scored.sort((a, b) => a.diff - b.diff);
+    const threshold = Math.max(scored[0].diff + ACCEPTABLE_DIFF, ACCEPTABLE_DIFF);
+    const acceptable = scored.filter(s => s.diff <= threshold);
+    return acceptable[Math.floor(Math.random() * acceptable.length)].imgPath;
   }
 
   // 第一优先：从标题中提取角色名，在图库中查找
