@@ -39,9 +39,14 @@ function loadPublishConfig() {
   }
 }
 
-function loadAllWorkConfigs() {
+function loadWechatConfig() {
   const config = loadPublishConfig();
   return config ? (config.wechat || {}) : {};
+}
+
+function loadAllWorkConfigs() {
+  const wechat = loadWechatConfig();
+  return wechat.works || {};
 }
 
 function normalizeHotArticleTitles(value) {
@@ -67,7 +72,8 @@ function normalizeHotArticleTitles(value) {
 
 function getConfiguredWechatHotArticleTitles(config) {
   if (!config || typeof config !== 'object') return null;
-  return normalizeHotArticleTitles(config.wechat_hot_articles_reference);
+  const wechat = config.wechat || {};
+  return normalizeHotArticleTitles(wechat.hot_articles_reference);
 }
 
 function formatWechatHotArticleTitles(titles) {
@@ -393,7 +399,8 @@ async function syncOneWork(api, workName, workConfig, opts) {
       // 保存草稿
       console.log('保存草稿...');
       const albumInfo = buildAlbumInfo(workConfig);
-      const result = await api.saveDraft(title, html, coverUrl, { albumInfo });
+      const wc = loadWechatConfig();
+      const result = await api.saveDraft(title, html, coverUrl, { albumInfo, author: wc.author, writerId: wc.writer_id });
 
       if (result.success) {
         successCount++;
@@ -479,7 +486,8 @@ program
 
     // 读取合并配置
     const publishConfig = loadPublishConfig() || {};
-    const wechatCombine = publishConfig.wechat_combine === true;
+    const wechatConfig = publishConfig.wechat || {};
+    const wechatCombine = wechatConfig.combine === true;
 
     // 合并模式下校验不超过 8 篇
     const MAX_COMBINE_ARTICLES = 8;
@@ -650,7 +658,7 @@ program
             title: t.topic,
             content: html,
             coverUrl,
-            options: { albumInfo },
+            options: { albumInfo, author: wechatConfig.author, writerId: wechatConfig.writer_id },
             work: workName,
           });
           totalSuccess++;
@@ -728,7 +736,7 @@ program
             const albumInfo = buildAlbumInfo(workConfig);
             draftArticles.push({
               title: topic.topic, content: html, coverUrl,
-              options: { albumInfo }, work: workName,
+              options: { albumInfo, author: wechatConfig.author, writerId: wechatConfig.writer_id }, work: workName,
             });
           }
 

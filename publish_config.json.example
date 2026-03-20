@@ -7,19 +7,23 @@
   "platforms": ["baijiahao", "toutiao", "wechat"],
   "publish": false,
   "interval": 30,
-  "wechat_hot_articles_reference": [
-    "黄药师为何独独不认杨过？",
-    "梁山真正看透宋江的人是谁？",
-    "孙悟空大闹天宫时，太上老君为何一直旁观？"
-  ],
-  "wechat_combine": true,
   "wechat": {
-    "西游记": {
-      "count": 1,
-      "album_id": "合集ID",
-      "album_title": "合集标题",
-      "image_dirs": ["西游记"],
-      "notionUrl": "https://www.notion.so/xxx"
+    "author": "你的公众号作者名",
+    "writer_id": "你的作者ID",
+    "combine": true,
+    "hot_articles_reference": [
+      "黄药师为何独独不认杨过？",
+      "梁山真正看透宋江的人是谁？",
+      "孙悟空大闹天宫时，太上老君为何一直旁观？"
+    ],
+    "works": {
+      "西游记": {
+        "count": 1,
+        "album_id": "合集ID",
+        "album_title": "合集标题",
+        "image_dirs": ["西游记"],
+        "notionUrl": "https://www.notion.so/xxx"
+      }
     }
   }
 }

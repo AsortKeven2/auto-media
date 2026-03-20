@@ -14,7 +14,7 @@ class WechatAPI {
   constructor(cookieStr) {
     this.token = '';
     this.ticket = '';
-    this.userInfo = null;
+
 
     const cookie = cookieStr || env.wechatCookie();
 
@@ -420,8 +420,8 @@ class WechatAPI {
     if (!this.token) await this.fetchToken();
     await this.fetchTicket();
 
-    const author = options.author || '叙世阁';
-    const writerId = options.writerId || '798895707';
+    const author = options.author || '';
+    const writerId = options.writerId || '';
     const claimSourceType = options.claimSourceType || '4';  // 个人观点，仅供参考
     const claimSource = options.claimSource || '个人观点，仅供参考';
     const albumInfo = options.albumInfo || '{"appmsg_album_infos":[]}';
@@ -691,8 +691,8 @@ class WechatAPI {
     for (let idx = 0; idx < count; idx++) {
       const a = articles[idx];
       const opts = a.options || {};
-      const author = opts.author || '叙世阁';
-      const writerId = opts.writerId || '798895707';
+      const author = opts.author || '';
+      const writerId = opts.writerId || '';
       const claimSourceType = opts.claimSourceType || '4';
       const claimSource = opts.claimSource || '个人观点，仅供参考';
       const albumInfo = opts.albumInfo || '{"appmsg_album_infos":[]}';

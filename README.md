@@ -92,19 +92,23 @@ images/
   "platforms": ["baijiahao", "toutiao", "wechat"],
   "publish": false,
   "interval": 30,
-  "wechat_hot_articles_reference": [
-    "黄药师为何独独不认杨过？",
-    "梁山真正看透宋江的人是谁？",
-    "孙悟空大闹天宫时，太上老君为何一直旁观？"
-  ],
-  "wechat_combine": true,
   "wechat": {
-    "西游记": {
-      "count": 1,
-      "notionUrl": "https://www.notion.so/xxx",
-      "album_id": "合集ID",
-      "album_title": "合集标题",
-      "image_dirs": ["西游记"]
+    "author": "你的公众号作者名",
+    "writer_id": "你的作者ID",
+    "combine": true,
+    "hot_articles_reference": [
+      "黄药师为何独独不认杨过？",
+      "梁山真正看透宋江的人是谁？",
+      "孙悟空大闹天宫时，太上老君为何一直旁观？"
+    ],
+    "works": {
+      "西游记": {
+        "count": 1,
+        "notionUrl": "https://www.notion.so/xxx",
+        "album_id": "合集ID",
+        "album_title": "合集标题",
+        "image_dirs": ["西游记"]
+      }
     }
   }
 }
@@ -115,9 +119,12 @@ images/
 - `platforms`: 发布平台列表（baijiahao / toutiao / wechat）
 - `publish`: `true`=直接发布，`false`=仅保存草稿
 - `interval`: 每篇发布间隔秒数
-- `wechat_hot_articles_reference`: 公众号热文标题列表（可选），也就是你手动指定的“热文参考标题”。支持字符串或字符串数组；配置后，程序会直接把这些标题作为参考注入公众号选题和写作。未配置或留空时，自动读取你自己公众号的热文标题作为参考
-- `wechat_combine`: `true`=多篇文章合并为一个多图文草稿，`false`=逐篇保存独立草稿（微信最多合并 8 篇）
-- `wechat`: 微信公众号配置（可选），每个作品可配置 `count`（AI 生成篇数）、`notionUrl`（Notion 同步）、`album_id`/`album_title`（合集）、`image_dirs`（配图目录）
+- `wechat`: 微信公众号配置
+  - `author`: 文章原创作者名
+  - `writer_id`: 作者ID
+  - `combine`: `true`=多篇文章合并为一个多图文草稿，`false`=逐篇保存独立草稿（微信最多合并 8 篇）
+  - `hot_articles_reference`: 公众号热文标题列表（可选），手动指定的”热文参考标题”。配置后直接作为参考注入选题和写作；未配置时自动读取公众号热文标题
+  - `works`: 各作品配置，每个作品可配置 `count`（AI 生成篇数）、`notionUrl`（Notion 同步）、`album_id`/`album_title`（合集）、`image_dirs`（配图目录）
 
 > **兜底机制**: 如果 `publish_config.json` 不存在，会尝试读取旧的 `batch.json` + `works.json`，都不存在则自动生成默认配置（每作品1篇，仅草稿），新项目可直接运行。
 
@@ -212,7 +219,7 @@ npm run help           # 显示所有命令
 批量生成时（`batch` / `generate`）会读取热文相关参考，并将其注入到选题和写作提示词中，提升内容质量。
 
 - **百家号**: 拉取最近15天文章，分析阅读量、推荐量、点击率
-- **微信公众号**: 如果 `publish_config.json` 配置了 `wechat_hot_articles_reference`，就直接把这些标题作为“手动指定的热文参考标题”用于生成；未配置时，拉取最近一周文章并缓存到本地（`data/wx_articles_cache.json`），直接读取你自己公众号的热文标题作为参考
+- **微信公众号**: 如果 `publish_config.json` 的 `wechat.hot_articles_reference` 配置了热文标题，就直接作为参考用于生成；未配置时，拉取最近一周文章并缓存到本地（`data/wx_articles_cache.json`），读取公众号热文标题作为参考
 
 ### 图片素材管理
 
