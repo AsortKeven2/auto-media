@@ -92,6 +92,11 @@ images/
   "platforms": ["baijiahao", "toutiao", "wechat"],
   "publish": false,
   "interval": 30,
+  "wechat_hot_articles_reference": [
+    "黄药师为何独独不认杨过？",
+    "梁山真正看透宋江的人是谁？",
+    "孙悟空大闹天宫时，太上老君为何一直旁观？"
+  ],
   "wechat_combine": true,
   "wechat": {
     "西游记": {
@@ -110,6 +115,7 @@ images/
 - `platforms`: 发布平台列表（baijiahao / toutiao / wechat）
 - `publish`: `true`=直接发布，`false`=仅保存草稿
 - `interval`: 每篇发布间隔秒数
+- `wechat_hot_articles_reference`: 公众号热文标题列表（可选），也就是你手动指定的“热文参考标题”。支持字符串或字符串数组；配置后，程序会直接把这些标题作为参考注入公众号选题和写作。未配置或留空时，自动读取你自己公众号的热文标题作为参考
 - `wechat_combine`: `true`=多篇文章合并为一个多图文草稿，`false`=逐篇保存独立草稿（微信最多合并 8 篇）
 - `wechat`: 微信公众号配置（可选），每个作品可配置 `count`（AI 生成篇数）、`notionUrl`（Notion 同步）、`album_id`/`album_title`（合集）、`image_dirs`（配图目录）
 
@@ -203,10 +209,10 @@ npm run help           # 显示所有命令
 
 ### 热文分析
 
-批量生成时（`batch` / `generate`）会自动拉取已发布文章的阅读数据，通过 LLM 分析高阅读量文章的标题和选题规律，将分析结果注入到选题和写作提示词中，提升内容质量。
+批量生成时（`batch` / `generate`）会读取热文相关参考，并将其注入到选题和写作提示词中，提升内容质量。
 
 - **百家号**: 拉取最近15天文章，分析阅读量、推荐量、点击率
-- **微信公众号**: 拉取最近一周文章并缓存到本地（`data/wx_articles_cache.json`），分析最近15天阅读量数据
+- **微信公众号**: 如果 `publish_config.json` 配置了 `wechat_hot_articles_reference`，就直接把这些标题作为“手动指定的热文参考标题”用于生成；未配置时，拉取最近一周文章并缓存到本地（`data/wx_articles_cache.json`），直接读取你自己公众号的热文标题作为参考
 
 ### 图片素材管理
 

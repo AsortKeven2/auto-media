@@ -9,6 +9,9 @@ const { callLLM } = require('./llm');
 const { listImagesByGroup } = require('./image-library');
 const { getCategory } = require('./categories');
 
+const RANKING_CATEGORY = '数字盘点类';
+const RANKING_SELF_CORRECTION_REGEX = /不对[，。！？、… ]|重新来|重新整理|咱们重新|哦对了|等等[，。！？、… ]|推翻重来/;
+
 /**
  * 从标题中识别涉及的作品
  * @param {string} title 文章标题
@@ -74,6 +77,128 @@ function buildImageList(imageDir, work, allowedGroups) {
   return `【${labels.join('+')}】${[...names].sort().join('、')}\n`;
 }
 
+function parseRankNumber(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return NaN;
+  if (/^\d+$/.test(text)) return parseInt(text, 10);
+
+  const digits = { 零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  if (text === '十') return 10;
+  if (text.includes('十')) {
+    const [tenPart, onePart] = text.split('十');
+    const tens = tenPart ? digits[tenPart] : 1;
+    const ones = onePart ? digits[onePart] : 0;
+    if (typeof tens === 'number' && typeof ones === 'number') {
+      return tens * 10 + ones;
+    }
+  }
+
+  return typeof digits[text] === 'number' ? digits[text] : NaN;
+}
+
+function normalizeRankingHeadings(article) {
+  return article.replace(
+    /^\s*\*\*第([一二三四五六七八九十百零两\d]+)名[：:]\s*(.+?)\*\*\s*$/gm,
+    '## 第$1名：$2'
+  );
+}
+
+function extractRankedName(titleText) {
+  const text = String(titleText || '')
+    .trim()
+    .replace(/^【[^】]+】\s*/, '');
+
+  if (!text) return '';
+
+  const match = text.match(/^(.+?)(?:——|———|--| - |- |：|:|（|\(|，|,|。|\s|$)/);
+  return (match ? match[1] : text).trim();
+}
+
+function extractRankingItems(article) {
+  const items = [];
+  const lines = article.split(/\r?\n/);
+
+  lines.forEach((line, idx) => {
+    const match = line.trim().match(/^##\s*第([一二三四五六七八九十百零两\d]+)名[：:]\s*(.+)$/);
+    if (!match) return;
+
+    items.push({
+      rank: parseRankNumber(match[1]),
+      rawRank: match[1],
+      name: extractRankedName(match[2]),
+      line: idx + 1,
+    });
+  });
+
+  return items;
+}
+
+function buildDuplicateList(values, formatter = v => v) {
+  const counts = new Map();
+  for (const value of values) {
+    if (!value) continue;
+    counts.set(value, (counts.get(value) || 0) + 1);
+  }
+
+  return [...counts.entries()]
+    .filter(([, count]) => count > 1)
+    .map(([value]) => formatter(value));
+}
+
+function validateRankingArticle(article) {
+  const normalizedArticle = normalizeRankingHeadings(article);
+  const items = extractRankingItems(normalizedArticle);
+  const errors = [];
+
+  if (RANKING_SELF_CORRECTION_REGEX.test(normalizedArticle)) {
+    errors.push('文中出现了“不对 / 哦对了 / 重新来”等自我纠正痕迹');
+  }
+
+  if (items.length < 3) {
+    errors.push(`只识别到 ${items.length} 个规范排名小标题，必须统一使用“## 第X名：角色——点评”`);
+  }
+
+  if (items.some(item => !Number.isFinite(item.rank))) {
+    errors.push('存在无法识别的名次写法，必须明确写成“第X名”');
+  }
+
+  const duplicateRanks = buildDuplicateList(
+    items.map(item => item.rank).filter(rank => Number.isFinite(rank)),
+    rank => `第${rank}名`
+  );
+  if (duplicateRanks.length) {
+    errors.push(`名次重复：${duplicateRanks.join('、')}`);
+  }
+
+  const duplicateNames = buildDuplicateList(items.map(item => item.name).filter(Boolean));
+  if (duplicateNames.length) {
+    errors.push(`角色重复上榜：${duplicateNames.join('、')}`);
+  }
+
+  if (items.length >= 2) {
+    const firstGap = items[1].rank - items[0].rank;
+    const step = firstGap === 1 ? 1 : firstGap === -1 ? -1 : 0;
+
+    if (!step) {
+      errors.push('名次顺序不连续，必须按相邻名次依次展开');
+    } else {
+      for (let i = 1; i < items.length; i++) {
+        if (items[i].rank !== items[i - 1].rank + step) {
+          errors.push('名次顺序不连续，必须按相邻名次依次展开');
+          break;
+        }
+      }
+    }
+  }
+
+  return {
+    article: normalizedArticle,
+    items,
+    valid: errors.length === 0,
+    errors,
+  };
+}
+
 function buildPrompt(topic, outline, work, imageList, category, opts = {}) {
   const catDef = category ? getCategory(category) : null;
   const wordCount = opts.wordCount || (catDef && catDef.maxWords);
@@ -117,7 +242,7 @@ function buildPrompt(topic, outline, work, imageList, category, opts = {}) {
   }
 
   const topArticlesHint = opts.topArticlesHint
-    ? `\n【参考：你的高阅读量文章特征】\n${opts.topArticlesHint}\n在写作时适当借鉴这些特征，但不要生硬模仿。\n`
+    ? `\n【参考：热文标题/特征】\n${opts.topArticlesHint}\n在写作时适当借鉴其中的标题风格、选题角度和读者兴趣点，但不要生硬模仿。\n`
     : '';
 
   return `根据以下选题，写一篇百家号文章。
@@ -261,12 +386,39 @@ async function generateArticle(topic, outline, work, characters, imageDir, categ
   // 如果有 relatedWorks，使用它作为图片目录列表；否则只用 work
   const allowedGroups = relatedWorks && relatedWorks.length > 0 ? relatedWorks : (work ? [work] : []);
   const imageList = imageDir ? buildImageList(imageDir, work, allowedGroups) : '';
-  const prompt = buildPrompt(topic, outline, work, imageList, category, opts);
+  const basePrompt = buildPrompt(topic, outline, work, imageList, category, opts);
+  const maxAttempts = category === RANKING_CATEGORY ? 3 : 1;
 
-  let article = await callLLM(prompt, { maxTokens });
+  let article = '';
+  let lastValidationErrors = [];
 
-  if (!article) {
-    throw new Error('文章生成失败，请检查 DOUBAO_API_KEY');
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const retryFeedback = lastValidationErrors.length
+      ? `\n\n【上次输出不合格，必须从头重写】\n${lastValidationErrors.map(msg => `- ${msg}`).join('\n')}\n- 名次只能出现一次，角色只能出现一次，严禁重复排名、跳排名、临时改排名\n- 所有排名项都必须写成规范小标题：## 第X名：角色——一句话点评\n- 不要沿用上一版的问题结构，直接输出修正后的完整定稿`
+      : '';
+
+    article = await callLLM(basePrompt + retryFeedback, { maxTokens });
+
+    if (!article) {
+      throw new Error('文章生成失败，请检查 DOUBAO_API_KEY');
+    }
+
+    if (category !== RANKING_CATEGORY) break;
+
+    const validation = validateRankingArticle(article);
+    article = validation.article;
+
+    if (validation.valid) {
+      break;
+    }
+
+    lastValidationErrors = validation.errors;
+    if (attempt < maxAttempts) {
+      console.warn(`  ⚠ 数字盘点类结构校验失败，第${attempt}次重试：${validation.errors.join('；')}`);
+      continue;
+    }
+
+    throw new Error(`数字盘点类结构校验失败：${validation.errors.join('；')}`);
   }
 
   let imageStats = { matched: [], missing: [] };
@@ -340,4 +492,13 @@ ${markdown}`;
   return { article, imageStats: { matched: resolved.matched, missing: resolved.missing } };
 }
 
-module.exports = { generateArticle, insertImages, buildImageList, resolveImageNames, stripLastSectionImages, detectWorksFromTitle };
+module.exports = {
+  generateArticle,
+  insertImages,
+  buildImageList,
+  resolveImageNames,
+  stripLastSectionImages,
+  detectWorksFromTitle,
+  normalizeRankingHeadings,
+  validateRankingArticle,
+};

@@ -7,6 +7,11 @@
   "platforms": ["baijiahao", "toutiao", "wechat"],
   "publish": false,
   "interval": 30,
+  "wechat_hot_articles_reference": [
+    "黄药师为何独独不认杨过？",
+    "梁山真正看透宋江的人是谁？",
+    "孙悟空大闹天宫时，太上老君为何一直旁观？"
+  ],
   "wechat_combine": true,
   "wechat": {
     "西游记": {

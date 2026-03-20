@@ -44,11 +44,66 @@ function loadAllWorkConfigs() {
   return config ? (config.wechat || {}) : {};
 }
 
-/**
- * 加载单个作品配置（合集ID、配图目录等）
- */
-function loadWorkConfig(work) {
-  return loadAllWorkConfigs()[work] || null;
+function normalizeHotArticleTitles(value) {
+  if (!value) return null;
+
+  if (typeof value === 'string') {
+    const lines = value
+      .split(/\r?\n/)
+      .map(line => line.replace(/^[-*•\d.\s]+/, '').trim())
+      .filter(Boolean);
+    return lines.length ? lines : null;
+  }
+
+  if (Array.isArray(value)) {
+    const titles = value
+      .map(item => String(item || '').trim())
+      .filter(Boolean);
+    return titles.length ? titles : null;
+  }
+
+  return null;
+}
+
+function getConfiguredWechatHotArticleTitles(config) {
+  if (!config || typeof config !== 'object') return null;
+  return normalizeHotArticleTitles(config.wechat_hot_articles_reference);
+}
+
+function formatWechatHotArticleTitles(titles) {
+  if (!titles || !titles.length) return null;
+  return titles.map((title, idx) => `${idx + 1}. ${title}`).join('\n');
+}
+
+async function resolveWechatHotArticlesHint(api, publishConfig) {
+  const configuredTitles = getConfiguredWechatHotArticleTitles(publishConfig);
+  if (configuredTitles) {
+    console.log('\n  使用 publish_config.json 中配置的公众号热文标题作为参考');
+    console.log(`  已加载 ${configuredTitles.length} 条手动配置的热文标题`);
+    return formatWechatHotArticleTitles(configuredTitles);
+  }
+
+  try {
+    console.log('\n  读取公众号热文标题...');
+    const wxApi = api || new WechatAPI();
+    if (!api) await wxApi.fetchToken();
+    const { byRead } = await wxApi.fetchTopArticles(10);
+
+    const hasData = byRead.length > 0 && byRead[0].read_num > 0;
+    if (!hasData) {
+      console.log('  文章数据暂无（阅读均为0），跳过热文标题参考');
+      return null;
+    }
+
+    console.log('  已获取热文标题');
+    byRead.slice(0, 3).forEach((a, i) => {
+      console.log(`    ${i + 1}. ${a.title} (阅读${a.read_num} 点赞${a.like_num})`);
+    });
+    return formatWechatHotArticleTitles(byRead.map(a => a.title).filter(Boolean));
+  } catch (e) {
+    console.error(`  热文标题读取失败（不影响生成）: ${e.message}`);
+    return null;
+  }
 }
 
 /**
@@ -457,47 +512,7 @@ program
       }
     }
 
-    // 热文分析
-    let topArticlesHint = null;
-    try {
-      console.log('\n  分析热文数据...');
-      const wxApi = api || new WechatAPI();
-      if (!api) await wxApi.fetchToken();
-      const { byRead } = await wxApi.fetchTopArticles(10);
-
-      const hasData = byRead.length > 0 && byRead[0].read_num > 0;
-      if (hasData) {
-        const formatLine = (a, i) => `${i + 1}. 「${a.title}」 阅读:${a.read_num} 点赞:${a.like_num} 分享:${a.share_num} 评论:${a.comment_num}`;
-        const analysisInput = '【阅读量最高的文章】\n' + byRead.map(formatLine).join('\n');
-
-        console.log(`  已获取热文数据`);
-        byRead.slice(0, 3).forEach((a, i) => {
-          console.log(`    ${i + 1}. ${a.title} (阅读${a.read_num} 点赞${a.like_num})`);
-        });
-
-        topArticlesHint = await callLLM(
-          `分析以下微信公众号已发布文章的数据：
-
-${analysisInput}
-
-请从以下维度分析（简洁，每点1-2句话）：
-1. 高阅读量文章的标题共性（句式、用词、悬念感）
-2. 低阅读量文章的标题问题在哪
-3. 哪些选题方向/作品/角色更受欢迎
-4. 对后续选题和写作的3条具体建议
-
-直接输出分析，不要超过400字。`,
-          { maxTokens: 600 }
-        );
-        if (topArticlesHint) {
-          console.log('  热文分析完成');
-        }
-      } else {
-        console.log('  文章数据暂无（阅读均为0），跳过热文分析');
-      }
-    } catch (e) {
-      console.error(`  热文分析失败（不影响生成）: ${e.message}`);
-    }
+    const topArticlesHint = await resolveWechatHotArticlesHint(api, publishConfig);
 
     let grandTotalSuccess = 0;
     let grandTotalFail = 0;
@@ -513,13 +528,35 @@ ${analysisInput}
     const allResults = [];
     const draftArticles = []; // 收集所有文章，最后合并为一个草稿
 
+    // ── 批次层面决定热文分配：总量 50%（向上取整）随机分配到各作品 ──
+    const hotCountPerWork = {};
+    if (topArticlesHint) {
+      const totalHot = Math.ceil(totalArticles / 2);
+      // 展开所有文章槽位，标记作品归属，然后随机选 totalHot 个作为热文
+      const slots = [];
+      for (const { name, count } of worksToGenerate) {
+        for (let i = 0; i < count; i++) slots.push(name);
+      }
+      // 随机打乱后取前 totalHot 个
+      const shuffledSlots = [...slots].sort(() => Math.random() - 0.5);
+      const hotSlots = shuffledSlots.slice(0, totalHot);
+      for (const name of Object.keys(Object.fromEntries(worksToGenerate.map(w => [w.name, 0])))) {
+        hotCountPerWork[name] = 0;
+      }
+      for (const name of hotSlots) {
+        hotCountPerWork[name] = (hotCountPerWork[name] || 0) + 1;
+      }
+      console.log(`\n  热文分配（总计 ${totalHot}/${totalArticles}）：${worksToGenerate.map(w => `${w.name} ${hotCountPerWork[w.name] || 0}条热文`).join('、')}`);
+    }
+
     for (const { name: workName, config: workConfig, count } of worksToGenerate) {
       console.log(`\n${'#'.repeat(60)}`);
       console.log(`  ${workName} — 计划 ${count} 篇`);
       console.log('#'.repeat(60));
 
-      // 生成选题
-      const topics = await generateTopics(count, workName, 'wechat', topArticlesHint);
+      // 生成选题，传入该作品分配到的热文数量
+      const workHotCount = hotCountPerWork[workName] || 0;
+      const topics = await generateTopics(count, workName, 'wechat', topArticlesHint, workHotCount);
       if (!topics.length) {
         console.error(`  ${workName}: 选题生成失败`);
         totalFail += count;
@@ -648,7 +685,7 @@ ${analysisInput}
           let topic = failedItem._topicObj;
           if (!topic) {
             console.log('  重新生成选题...');
-            const retryTopics = await generateTopics(1, workName, 'wechat', topArticlesHint);
+            const retryTopics = await generateTopics(1, workName, 'wechat', topArticlesHint, 0);
             if (!retryTopics.length) {
               console.error(`  ✗ 补偿选题仍然失败: ${workName}`);
               continue;

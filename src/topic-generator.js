@@ -102,7 +102,7 @@ function saveHistory(allHistory) {
 /**
  * 调用 AI 生成选题（按作品独立历史 + 分类别生成）
  */
-async function generateTopics(count = 10, workFilter = null, platform = 'baijiahao', topArticlesHint = null) {
+async function generateTopics(count = 10, workFilter = null, platform = 'baijiahao', topArticlesHint = null, explicitHotCount = null) {
   const works = listWorks();
   const allHistory = loadPerNovelHistory();
 
@@ -126,15 +126,21 @@ async function generateTopics(count = 10, workFilter = null, platform = 'baijiah
 
   const categoryText = buildCategoryPromptSection();
 
-  // 本地随机分配类别，不依赖 AI 选择；同一作品尽量不重复类别
-  const categoryNames = platform === 'wechat'
-    ? ['数字盘点类', '假设对比类', '细节深挖类']
-    : Object.keys(CATEGORIES);
+  const platformLabel = platform === 'wechat' ? '微信公众号' : '百家号/头条号';
+
+  // ── 热文/正常分配由调用方通过 explicitHotCount 决定 ──
+  const hotCount = (topArticlesHint && explicitHotCount !== null) ? Math.min(explicitHotCount, count) : 0;
+  const normalCount = count - hotCount;
+  if (hotCount > 0) {
+    console.log(`  混合模式：${hotCount} 条热文风格 + ${normalCount} 条正常分类`);
+  }
+
+  // 本地随机分配类别（仅用于 normalCount 部分，排除"热文风格"）
+  const categoryNames = Object.keys(CATEGORIES).filter(c => c !== '热文风格');
   const assignedCategories = [];
-  // 先打乱类别列表，按顺序分配，用完再重新打乱
   let shuffled = [...categoryNames].sort(() => Math.random() - 0.5);
   let shuffleIdx = 0;
-  for (let i = 0; i < count; i++) {
+  for (let i = 0; i < normalCount; i++) {
     if (shuffleIdx >= shuffled.length) {
       shuffled = [...categoryNames].sort(() => Math.random() - 0.5);
       shuffleIdx = 0;
@@ -142,14 +148,82 @@ async function generateTopics(count = 10, workFilter = null, platform = 'baijiah
     assignedCategories.push(shuffled[shuffleIdx++]);
   }
 
-  const categoryAssignment = assignedCategories
-    .map((cat, i) => `第${i + 1}个选题 → ${cat}`)
-    .join('\n');
+  if (!allHistory[work]) allHistory[work] = [];
+  const results = [];
 
-  const platformLabel = platform === 'wechat' ? '微信公众号' : '百家号/头条号';
+  // ── 辅助：解析 AI 返回并收集结果 ──
+  function parseAndCollect(content, maxCount, getCategoryFn) {
+    const jsonMatch = content.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) {
+      console.error(`  选题解析失败 — AI 返回格式异常，内容: ${content.slice(0, 200)}`);
+      return;
+    }
+    let topics;
+    try {
+      topics = JSON.parse(jsonMatch[0]).slice(0, maxCount);
+    } catch (parseErr) {
+      console.error(`  选题解析失败 — JSON 解析失败: ${parseErr.message}`);
+      return;
+    }
+    for (let idx = 0; idx < topics.length; idx++) {
+      const t = topics[idx];
+      if (!t.topic) continue;
+      if (allHistory[work].includes(t.topic)) continue;
+      const category = getCategoryFn(idx);
+      allHistory[work].push(t.topic);
+      results.push({
+        topic: t.topic,
+        category,
+        type: category,
+        work,
+        main_character: t.main_character || (t.characters && t.characters[0]) || '',
+        characters: t.characters || [],
+        related_works: t.related_works || [work],
+      });
+    }
+  }
 
-  // ── 公共类型描述（微信 & 百家号共用） ──
-  const sharedTypeDesc = `
+  // ── 第一批：热文风格（如有） ──
+  if (hotCount > 0) {
+    const hotPrompt = `为${platformLabel}生成 ${hotCount} 个关于《${work}》的爆款选题。
+${historyText}
+
+【热文标题参考——这是已验证的高流量标题，你必须严格模仿它们的风格】
+${topArticlesHint}
+
+【核心要求】
+1. 仔细分析以上热文标题的句式结构、悬念设置、用词风格，新标题必须与热文标题保持一致的风格和套路
+2. 可以模仿热文的句式模板（如"难怪...不是...你看...""如果...能否...你看..."），但内容必须围绕《${work}》的不同角色和情节
+3. 每个标题必须提到至少一个具体角色名
+4. 标题不超过30字
+5. 不要与已有选题重复或相似
+6. 标题禁止出现任何英文字母和阿拉伯数字，数字一律用汉字表达
+7. 如果是跨作品对比，必须在 related_works 字段中列出所有相关作品
+
+输出格式（严格 JSON 数组）：
+[{"topic": "标题", "category": "热文风格", "main_character": "核心角色", "characters": ["角色1", "角色2"], "related_works": ["作品1", "作品2"]}]`;
+
+    try {
+      const hotContent = await callLLM(hotPrompt, { maxTokens: 2000 });
+      if (hotContent) {
+        // 热文风格的选题统一使用"热文风格"类别
+        parseAndCollect(hotContent, hotCount, () => '热文风格');
+      } else {
+        console.error(`  热文风格选题生成失败: ${work} — AI 返回为空`);
+      }
+    } catch (e) {
+      console.error(`  热文风格选题生成失败: ${work} — ${e.message}`);
+    }
+  }
+
+  // ── 第二批：正常分类 ──
+  if (normalCount > 0) {
+    const categoryAssignment = assignedCategories
+      .map((cat, i) => `第${i + 1}个选题 → ${cat}`)
+      .join('\n');
+
+    // ── 公共类型描述（微信 & 百家号共用） ──
+    const sharedTypeDesc = `
 类型6 - 数字盘点/排行：
 - 盘点某部作品中的角色、法宝、事件等，数量不低于五个
 - 标题必须包含作品名或作品标志词（如"西游""梁山""三国"），让读者一眼知道写的是哪部作品
@@ -170,23 +244,7 @@ async function generateTopics(count = 10, workFilter = null, platform = 'baijiah
 - 标题必须包含作品名或作品标志词，并提到具体角色
 - 要有"你可能没注意到"的发现感，让读者觉得值得点进去看`;
 
-  // 微信专用
-  const wechatTopicSection = `
-【标题类型说明】
-只用以下三种类型，每种类型的标题句式必须每篇都不同，禁止套用固定模板：
-${sharedTypeDesc}
-
-【严格要求】
-1. 只围绕《${work}》，标题不超过20字（根据内容自然表达，不要刻意凑字数）
-2. 每个标题的句式、结构、用词都必须不同，绝对禁止多个标题用相同模板
-3. 只从类型6（数字盘点/排行）、类型7（假设对比）、类型8（细节深挖）中选择
-4. 不要与已有选题重复或相似
-5. 每个选题标注所属类别
-6. 如果是跨作品对比，必须在 related_works 字段中列出所有相关作品
-7. 标题禁止出现任何英文字母和阿拉伯数字，数字一律用汉字表达`;
-
-  // 百家号/头条号：全类型
-  const baijiahaoTopicSection = `
+    const topicSection = `
 【标题类型说明】
 以下是所有可用类型，每种类型的标题句式必须每篇都不同，禁止套用固定模板：
 
@@ -228,15 +286,9 @@ ${sharedTypeDesc}
 7. 不要全部标题都用问号结尾，句式随机发挥
 8. 标题禁止出现任何英文字母和阿拉伯数字，数字一律用汉字表达`;
 
-  const topicSection = platform === 'wechat' ? wechatTopicSection : baijiahaoTopicSection;
-
-  const topArticlesSection = topArticlesHint
-    ? `\n【热文参考——你的高阅读量文章规律】\n${topArticlesHint}\n请参考以上规律，让新选题的标题风格和选题方向向高阅读量文章靠拢。\n`
-    : '';
-
-  const prompt = `为${platformLabel}生成 ${count} 个关于《${work}》的爆款选题。
+    const normalPrompt = `为${platformLabel}生成 ${normalCount} 个关于《${work}》的爆款选题。
 ${historyText}
-${topArticlesSection}
+
 类别说明：
 ${categoryText}
 
@@ -250,57 +302,20 @@ ${topicSection}
 说明：
 - related_works: 如果是跨作品对比（如"关羽攻打梁山"），列出所有涉及的作品["三国演义", "水浒传"]；如果只涉及《${work}》，则为["${work}"]`;
 
-  try {
-    const content = await callLLM(prompt, { maxTokens: 2000 });
-    if (!content) {
-      console.error(`选题生成失败: ${work} — AI 返回为空`);
-      return [];
-    }
-
-    const jsonMatch = content.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) {
-      console.error(`选题生成失败: ${work} — AI 返回格式异常，内容: ${content.slice(0, 200)}`);
-      return [];
-    }
-
-    let topics;
     try {
-      topics = JSON.parse(jsonMatch[0]).slice(0, count);
-    } catch (parseErr) {
-      console.error(`选题生成失败: ${work} — JSON 解析失败: ${parseErr.message}，内容: ${jsonMatch[0].slice(0, 200)}`);
-      return [];
+      const normalContent = await callLLM(normalPrompt, { maxTokens: 2000 });
+      if (normalContent) {
+        parseAndCollect(normalContent, normalCount, (idx) => assignedCategories[idx]);
+      } else {
+        console.error(`  正常分类选题生成失败: ${work} — AI 返回为空`);
+      }
+    } catch (e) {
+      console.error(`  正常分类选题生成失败: ${work} — ${e.message}`);
     }
-    const results = [];
-
-    if (!allHistory[work]) allHistory[work] = [];
-
-    for (let idx = 0; idx < topics.length; idx++) {
-      const t = topics[idx];
-      if (!t.topic) continue;
-      // 仅精确匹配去重，语义去重交给 AI
-      if (allHistory[work].includes(t.topic)) continue;
-
-      // 用本地分配的类别，不信任 AI 返回的 category
-      const category = assignedCategories[idx];
-
-      allHistory[work].push(t.topic);
-      results.push({
-        topic: t.topic,
-        category,
-        type: category,
-        work,
-        main_character: t.main_character || (t.characters && t.characters[0]) || '',
-        characters: t.characters || [],
-        related_works: t.related_works || [work],
-      });
-    }
-
-    saveHistory(allHistory);
-    return results;
-  } catch (e) {
-    console.error(`选题生成失败: ${work} — ${e.message}`);
-    return [];
   }
+
+  saveHistory(allHistory);
+  return results;
 }
 
 /**
