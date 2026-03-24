@@ -7,6 +7,15 @@
   "platforms": ["baijiahao", "toutiao", "wechat"],
   "publish": false,
   "interval": 30,
+  "baijiahao": {
+    "works": {
+      "西游记": {
+        "count": 1,
+        "notionUrl": "https://www.notion.so/xxx",
+        "image_dirs": ["西游记"]
+      }
+    }
+  },
   "wechat": {
     "author": "你的公众号作者名",
     "writer_id": "你的作者ID",

@@ -92,6 +92,15 @@ images/
   "platforms": ["baijiahao", "toutiao", "wechat"],
   "publish": false,
   "interval": 30,
+  "baijiahao": {
+    "works": {
+      "西游记": {
+        "count": 1,
+        "notionUrl": "https://www.notion.so/xxx",
+        "image_dirs": ["西游记"]
+      }
+    }
+  },
   "wechat": {
     "author": "你的公众号作者名",
     "writer_id": "你的作者ID",
@@ -119,6 +128,8 @@ images/
 - `platforms`: 发布平台列表（baijiahao / toutiao / wechat）
 - `publish`: `true`=直接发布，`false`=仅保存草稿
 - `interval`: 每篇发布间隔秒数
+- `baijiahao`: 百家号 Notion 直发配置
+  - `works`: 各作品的 Notion 来源配置，每个作品可配置 `count`（每次运行该作品最多读取并立即发布几篇）、`notionUrl`（Notion 目录页）和 `image_dirs`（配图目录）
 - `wechat`: 微信公众号配置
   - `author`: 文章原创作者名
   - `writer_id`: 作者ID
@@ -201,6 +212,24 @@ node src/wechat-main.js list
 node src/wechat-main.js clean
 ```
 
+执行 `wx batch` 时，会先把 Notion 页面同步到本地 Markdown（同步时就完成配图），再继续推送到公众号草稿箱。
+
+### 百家号本地 Markdown 发布
+
+```bash
+# 手动从 Notion 同步到本地 Markdown（同步时就配图）
+node src/bjh-notion-main.js sync
+node src/bjh-notion-main.js sync 西游记
+
+# 从本地 Markdown 发布到百家号（按 baijiahao.works.<作品>.count 控制数量）
+node src/bjh-notion-main.js publish
+node src/bjh-notion-main.js publish 西游记
+
+# 查看本地同步/发布状态
+node src/bjh-notion-main.js status
+node src/bjh-notion-main.js status 西游记
+```
+
 ### npm scripts 快捷方式
 
 ```bash
@@ -209,6 +238,9 @@ npm run batch          # 批量生成并发布（三平台）
 npm run batch:dry      # 批量生成但不推送
 npm run batch:bjh      # 仅发百家号
 npm run batch:tt       # 仅发头条
+npm run bjh:sync       # 手动同步 Notion 到本地 Markdown
+npm run bjh:publish    # 从本地 Markdown 发布到百家号
+npm run bjh:status     # 查看百家号本地 Markdown 状态
 npm run wx:batch       # 微信公众号批量同步
 npm run wx:list        # 列出公众号草稿
 npm run help           # 显示所有命令

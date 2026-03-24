@@ -10,12 +10,12 @@ const path = require('path');
 const fs = require('fs');
 
 const { WechatAPI } = require('./wechat-api');
-const { fetchNotionPage, fetchNotionDirectory } = require('./notion-fetcher');
+const { fetchNotionDirectory } = require('./notion-fetcher');
 const { mdToHtml, extractImagePaths, DEFAULT_IMAGE_DIR, DEFAULT_TAIL_IMAGE } = require('./batch-publish');
-const { buildImageList, resolveImageNames, stripLastSectionImages, generateArticle } = require('./article-generator');
+const { generateArticle } = require('./article-generator');
 const { selectCoverImage } = require('./image-library');
 const { generateTopics } = require('./topic-generator');
-const { callLLM } = require('./llm');
+const { ensureLocalMarkdownSynced, loadBjhSyncState, saveBjhSyncState } = require('./notion-local-sync');
 
 const SYNC_STATE_FILE = path.join(__dirname, '..', '.wx-sync-state.json');
 const WX_SYNC_DIR = path.join(__dirname, '..', 'archive', 'wechat', 'sync');
@@ -151,57 +151,6 @@ function saveArticleArchive(title, markdown, outputDir) {
 }
 
 /**
- * AI 配图：将文章和可用图片列表发给豆包，由 AI 决定插图位置和角色
- * @param {string[]} [allowedGroups] 允许的图片子目录列表
- */
-async function aiInsertImages(markdown, imageDir, work, allowedGroups) {
-  const imageList = buildImageList(imageDir, work, allowedGroups);
-  if (!imageList) {
-    console.log('  无可用配图列表');
-    return markdown;
-  }
-
-  const prompt = `你是配图助手。以下是一篇已写好的文章和可用的配图人物列表。
-请在文章的适当位置插入配图标记。
-
-要求：
-- 每 300 字左右插入一张配图，格式：![配图](人物名)，如 ![配图](孙悟空)
-- 人物名必须从下面的可用配图列表中原样选取（如"孙悟空""周瑜""郭襄"），严禁使用场景描述（如"白衣渡江""水淹七军""大闹天宫"），找不到匹配人物宁可不插图
-- 注意人物别名：二郎神=杨戬、猪八戒=天蓬元帅、沙僧=沙悟净，遇到别名请使用列表中对应的名称
-- 根据上下文选择最相关的人物角色
-- 最后一个章节不插图
-- 保持原文内容完全不变，只添加配图标记
-- 输出完整的文章（含配图标记），Markdown 格式，不要输出额外说明
-
-可用配图：
-${imageList}
-
-文章：
-${markdown}`;
-
-  console.log('  AI 分析配图中...');
-  let result = await callLLM(prompt, { maxTokens: 8000 });
-  if (!result) {
-    console.log('  AI 配图失败，跳过配图');
-    return markdown;
-  }
-
-  // 修正 AI 常见畸形写法
-  result = result
-    .replace(/!\[([^\]】]*)】\(/g, '![$1](')
-    .replace(/！\[/g, '![')
-    .replace(/\]\（/g, '](')
-    .replace(/）/g, ')');
-
-  // 解析图片名称 → 本地路径
-  const resolved = resolveImageNames(result, imageDir, work, allowedGroups);
-  let article = stripLastSectionImages(resolved.article);
-
-  console.log(`  AI 配图完成: 匹配 ${resolved.matched.length} 张, 缺失 ${resolved.missing.length} 张`);
-  return article;
-}
-
-/**
  * 根据作品配置构建合集 albumInfo JSON
  */
 function buildAlbumInfo(workConfig) {
@@ -268,6 +217,7 @@ async function syncOneWork(api, workName, workConfig, opts) {
   const imageDir = path.resolve(DEFAULT_IMAGE_DIR);
   const allowedGroups = workConfig.image_dirs || [workName];
   const interval = parseInt(opts.interval) * 1000;
+  const bjhSyncState = loadBjhSyncState();
 
   console.log(`\n${'='.repeat(50)}`);
   console.log(`  作品: ${workName}`);
@@ -321,7 +271,6 @@ async function syncOneWork(api, workName, workConfig, opts) {
 
   for (let i = 0; i < pendingPages.length; i++) {
     const child = pendingPages[i];
-    const pageUrl = `https://www.notion.so/${child.id.replace(/-/g, '')}`;
 
     console.log(`\n${'─'.repeat(50)}`);
     console.log(`  [${i + 1}/${pendingPages.length}] ${child.title}`);
@@ -334,20 +283,27 @@ async function syncOneWork(api, workName, workConfig, opts) {
     }
 
     try {
-      // 获取页面内容
-      console.log('获取页面内容...');
-      const page = await fetchNotionPage(pageUrl);
-      const { title, markdown } = page;
-      console.log(`  字数: ${markdown.replace(/\s/g, '').length}`);
+      // 获取页面内容，并同步到本地 Markdown（带配图）
+      console.log('同步到本地 Markdown...');
+      const syncResult = await ensureLocalMarkdownSynced({
+        pageId: child.id,
+        pageTitle: child.title,
+        workName,
+        allowedGroups,
+        imageDir,
+        autoImages: opts.autoImages !== false,
+        state: bjhSyncState,
+      });
+      bjhSyncState[child.id] = syncResult.stateEntry;
+      saveBjhSyncState(bjhSyncState);
 
-      // AI 自动配图
-      let finalMarkdown = markdown;
-      if (opts.autoImages !== false) {
-        console.log('AI 自动配图...');
-        finalMarkdown = await aiInsertImages(markdown, imageDir, workName, allowedGroups);
-        const origCount = (markdown.match(/!\[.*?\]\(.*?\)/g) || []).length;
-        const newCount = (finalMarkdown.match(/!\[.*?\]\(.*?\)/g) || []).length;
-        if (newCount > origCount) console.log(`  新增配图: ${newCount - origCount} 张`);
+      const title = syncResult.title;
+      let finalMarkdown = syncResult.markdown;
+      console.log(`  字数: ${finalMarkdown.replace(/\s/g, '').length}`);
+      if (syncResult.reused) {
+        console.log('  复用已同步到本地的 Markdown');
+      } else if (syncResult.imageStats.missing.length) {
+        console.log(`  缺失: ${syncResult.imageStats.missing.join('、')}`);
       }
 
       // 归档 AI 配图后的文章
@@ -358,9 +314,6 @@ async function syncOneWork(api, workName, workConfig, opts) {
       if (tailImage && fs.existsSync(tailImage)) {
         finalMarkdown += `\n\n![尾图](${tailImage})\n`;
       }
-
-      // 转 HTML
-      let html = mdToHtml(finalMarkdown, 'wechat');
 
       // 封面：标题角色图 > 文中最佳比例图
       const imagePaths = extractImagePaths(finalMarkdown);
@@ -390,6 +343,9 @@ async function syncOneWork(api, workName, workConfig, opts) {
         const uploaded = await api.uploadImage(coverResult.coverPath);
         coverUrl = uploaded?.url || null;
       }
+
+      // 转 HTML
+      let html = mdToHtml(finalMarkdown, 'wechat');
 
       // 上传正文图片
       console.log('上传图片...');
@@ -866,10 +822,12 @@ program
       if (!config) {
         console.error(`作品 "${work}" 未在 publish_config.json 的 wechat 中配置`);
         console.log(`可用作品: ${Object.keys(allConfigs).join('、')}`);
+        process.exitCode = 1;
         return;
       }
       if (!config.notionUrl) {
         console.error(`作品 "${work}" 未配置 notionUrl`);
+        process.exitCode = 1;
         return;
       }
       worksToSync = [{ name: work, config }];
@@ -879,6 +837,7 @@ program
         .map(([name, config]) => ({ name, config }));
       if (!worksToSync.length) {
         console.error('publish_config.json 的 wechat 中没有配置 notionUrl 的作品');
+        process.exitCode = 1;
         return;
       }
       console.log(`将同步 ${worksToSync.length} 部作品: ${worksToSync.map(w => w.name).join('、')}`);
@@ -889,6 +848,7 @@ program
     const auth = await api.checkAuth();
     if (!auth.success) {
       console.error('公众号未登录，请先运行: wx login "<cookie>"');
+      process.exitCode = 1;
       return;
     }
 
@@ -906,6 +866,10 @@ program
       console.log(`\n${'='.repeat(50)}`);
       console.log(`  全部完成: 成功 ${totalSuccess} 篇 | 失败 ${totalFail} 篇`);
       console.log('='.repeat(50));
+    }
+
+    if (totalFail > 0) {
+      process.exitCode = 1;
     }
   });
 
