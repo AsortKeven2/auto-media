@@ -17,7 +17,8 @@ const { selectCoverImage } = require('./image-library');
 const { generateTopics } = require('./topic-generator');
 const { ensureLocalMarkdownSynced, loadBjhSyncState, saveBjhSyncState } = require('./notion-local-sync');
 
-const SYNC_STATE_FILE = path.join(__dirname, '..', '.wx-sync-state.json');
+const SYNC_STATE_FILE = path.join(__dirname, '..', 'wx-sync-state.json');
+const LEGACY_SYNC_STATE_FILE = path.join(__dirname, '..', '.wx-sync-state.json');
 const WX_SYNC_DIR = path.join(__dirname, '..', 'archive', 'wechat', 'sync');
 const WX_GENERATED_DIR = path.join(__dirname, '..', 'archive', 'wechat', 'generated');
 const PUBLISH_CONFIG_PATH = path.join(__dirname, '..', 'publish_config.json');
@@ -76,6 +77,23 @@ function getConfiguredWechatHotArticleTitles(config) {
   return normalizeHotArticleTitles(wechat.hot_articles_reference);
 }
 
+function resolveWechatSyncStateFile() {
+  if (fs.existsSync(SYNC_STATE_FILE)) return SYNC_STATE_FILE;
+
+  if (fs.existsSync(LEGACY_SYNC_STATE_FILE)) {
+    try {
+      fs.copyFileSync(LEGACY_SYNC_STATE_FILE, SYNC_STATE_FILE);
+      console.log('  已迁移公众号同步状态文件到 wx-sync-state.json');
+      return SYNC_STATE_FILE;
+    } catch (e) {
+      console.error(`⚠ 公众号同步状态文件迁移失败: ${e.message}`);
+      return LEGACY_SYNC_STATE_FILE;
+    }
+  }
+
+  return SYNC_STATE_FILE;
+}
+
 function formatWechatHotArticleTitles(titles) {
   if (!titles || !titles.length) return null;
   return titles.map((title, idx) => `${idx + 1}. ${title}`).join('\n');
@@ -116,9 +134,10 @@ async function resolveWechatHotArticlesHint(api, publishConfig) {
  * 读取同步状态（Notion 页面 ID → 微信草稿信息）
  */
 function loadSyncState() {
-  if (!fs.existsSync(SYNC_STATE_FILE)) return {};
+  const stateFile = resolveWechatSyncStateFile();
+  if (!fs.existsSync(stateFile)) return {};
   try {
-    return JSON.parse(fs.readFileSync(SYNC_STATE_FILE, 'utf-8'));
+    return JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
   } catch (e) {
     console.error(`⚠ 同步状态文件解析失败: ${e.message}`);
     return {};
@@ -129,7 +148,8 @@ function loadSyncState() {
  * 保存同步状态
  */
 function saveSyncState(state) {
-  fs.writeFileSync(SYNC_STATE_FILE, JSON.stringify(state, null, 2), 'utf-8');
+  const stateFile = resolveWechatSyncStateFile();
+  fs.writeFileSync(stateFile, JSON.stringify(state, null, 2), 'utf-8');
 }
 
 /**

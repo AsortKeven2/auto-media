@@ -5,8 +5,51 @@ const { fetchNotionPage, fetchNotionDirectory } = require('./notion-fetcher');
 const { insertImages } = require('./article-generator');
 const { DEFAULT_IMAGE_DIR } = require('./batch-publish');
 
-const BJH_SYNC_STATE_FILE = path.join(__dirname, '..', '.bjh-sync-state.json');
+const BJH_SYNC_STATE_FILE = path.join(__dirname, '..', 'bjh-sync-state.json');
+const LEGACY_BJH_SYNC_STATE_FILE = path.join(__dirname, '..', '.bjh-sync-state.json');
 const LOCAL_SYNC_ROOT_DIR = path.join(__dirname, '..', 'archive', 'notion-sync');
+
+function readStateJson(filePath) {
+  if (!fs.existsSync(filePath)) return { exists: false, data: {} };
+
+  try {
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    if (!raw.trim()) {
+      throw new Error('文件为空');
+    }
+    return { exists: true, data: JSON.parse(raw) };
+  } catch (e) {
+    return { exists: true, error: e };
+  }
+}
+
+function resolveBjhSyncStateFile() {
+  const primary = readStateJson(BJH_SYNC_STATE_FILE);
+  if (primary.exists && !primary.error) {
+    return { file: BJH_SYNC_STATE_FILE, data: primary.data };
+  }
+
+  const legacy = readStateJson(LEGACY_BJH_SYNC_STATE_FILE);
+  if (legacy.exists && !legacy.error) {
+    try {
+      fs.writeFileSync(BJH_SYNC_STATE_FILE, JSON.stringify(legacy.data, null, 2), 'utf-8');
+      console.log('  已迁移百家号同步状态文件到 bjh-sync-state.json');
+      return { file: BJH_SYNC_STATE_FILE, data: legacy.data };
+    } catch (e) {
+      console.error(`⚠ 百家号同步状态文件迁移失败: ${e.message}`);
+      return { file: LEGACY_BJH_SYNC_STATE_FILE, data: legacy.data };
+    }
+  }
+
+  if (primary.error) {
+    console.error(`⚠ 百家号同步状态文件解析失败: ${primary.error.message}`);
+  }
+  if (legacy.error) {
+    console.error(`⚠ 旧百家号同步状态文件解析失败: ${legacy.error.message}`);
+  }
+
+  return { file: BJH_SYNC_STATE_FILE, data: {} };
+}
 
 function sanitizeFileName(value) {
   return String(value || '')
@@ -21,17 +64,16 @@ function ensureDir(dir) {
 }
 
 function loadBjhSyncState() {
-  if (!fs.existsSync(BJH_SYNC_STATE_FILE)) return {};
-  try {
-    return JSON.parse(fs.readFileSync(BJH_SYNC_STATE_FILE, 'utf-8'));
-  } catch (e) {
-    console.error(`⚠ 百家号同步状态文件解析失败: ${e.message}`);
-    return {};
-  }
+  return resolveBjhSyncStateFile().data;
 }
 
 function saveBjhSyncState(state) {
-  fs.writeFileSync(BJH_SYNC_STATE_FILE, JSON.stringify(state, null, 2), 'utf-8');
+  const { file } = resolveBjhSyncStateFile();
+  fs.writeFileSync(file, JSON.stringify(state, null, 2), 'utf-8');
+}
+
+function getBjhSyncStateFile() {
+  return resolveBjhSyncStateFile().file;
 }
 
 function buildNotionPageUrl(pageId) {
@@ -215,6 +257,7 @@ module.exports = {
   LOCAL_SYNC_ROOT_DIR,
   loadBjhSyncState,
   saveBjhSyncState,
+  getBjhSyncStateFile,
   buildNotionPageUrl,
   buildLocalMarkdownPath,
   readLocalMarkdown,

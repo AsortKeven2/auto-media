@@ -15,6 +15,7 @@ const { selectCoverImage } = require('./image-library');
 const {
   loadBjhSyncState,
   saveBjhSyncState,
+  getBjhSyncStateFile,
   readLocalMarkdown,
   syncNotionWorkToLocal,
 } = require('./notion-local-sync');
@@ -136,6 +137,13 @@ function buildStatusSummary(state, workName) {
     missing,
     pending: synced + failed,
   };
+}
+
+function countPublishableEntries(state, workName) {
+  return Object.values(state)
+    .filter(entry => entry.work === workName)
+    .filter(entry => entry.status === 'synced' || entry.status === 'publish_failed')
+    .filter(entry => entry.local_file && fs.existsSync(entry.local_file)).length;
 }
 
 async function buildPublishPayload(api, entry, workName, workConfig, opts) {
@@ -301,6 +309,7 @@ async function runPublish(work, opts) {
   console.log('='.repeat(60));
   console.log('  百家号从本地 Markdown 发布');
   console.log('='.repeat(60));
+  console.log(`  状态文件: ${getBjhSyncStateFile()}`);
   worksToPublish.forEach(item => {
     console.log(`  ${item.name}: ${item.count} 篇/次`);
   });
@@ -308,11 +317,13 @@ async function runPublish(work, opts) {
   console.log('='.repeat(60));
 
   for (const { name: workName, config: workConfig, count } of worksToPublish) {
+    const publishableCount = countPublishableEntries(state, workName);
     const pendingEntries = buildPendingEntries(state, workName, count);
 
     console.log(`\n${'='.repeat(50)}`);
     console.log(`  作品: ${workName}`);
     console.log('='.repeat(50));
+    console.log(`  可发布记录: ${publishableCount} 篇`);
     console.log(`  本轮待发布: ${pendingEntries.length} 篇`);
 
     if (!pendingEntries.length) continue;

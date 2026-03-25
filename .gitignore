@@ -18,6 +18,8 @@ publish_config.json
 # 同步状态
 .wx-sync-state.json
 .bjh-sync-state.json
+wx-sync-state.json
+bjh-sync-state.json
 
 # 历史记录
 data/
