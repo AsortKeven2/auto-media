@@ -6,11 +6,12 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const FormData = require('form-data');
-const env = require('./env');
+const config = require('./config');
+const { resolveProjectFile } = require('./local-file-utils');
 
 class ToutiaoAPI {
   constructor(cookieStr) {
-    const cookie = cookieStr || env.toutiaoCookie();
+    const cookie = cookieStr || config.toutiaoCookie();
 
     this.client = axios.create({
       headers: {
@@ -289,10 +290,9 @@ class ToutiaoAPI {
       const decodedSrc = decodeURIComponent(src);
 
       let uploadResult = null;
-      if (fs.existsSync(decodedSrc)) {
-        uploadResult = await this.uploadImage(decodedSrc);
-      } else if (fs.existsSync(src)) {
-        uploadResult = await this.uploadImage(src);
+      const resolvedLocal = resolveProjectFile(decodedSrc) || resolveProjectFile(src);
+      if (resolvedLocal) {
+        uploadResult = await this.uploadImage(resolvedLocal);
       } else if (src.startsWith('http')) {
         uploadResult = await this.uploadImageFromUrl(src);
       }

@@ -13,10 +13,11 @@ const { ToutiaoAPI } = require('./toutiao-api');
 const { WechatAPI } = require('./wechat-api');
 const { listArticles, updateMeta } = require('./content-manager');
 const { selectCoverImage } = require('./image-library');
-const env = require('./env');
+const { resolveProjectFile } = require('./local-file-utils');
+const config = require('./config');
 
-const DEFAULT_IMAGE_DIR = env.imageDir();
-const DEFAULT_TAIL_IMAGE = env.tailImage();
+const DEFAULT_IMAGE_DIR = config.imageDir();
+const DEFAULT_TAIL_IMAGE = config.tailImage();
 
 /**
  * Markdown 转 HTML（支持多平台）
@@ -134,20 +135,27 @@ function extractImagePaths(markdown) {
   let match;
   while ((match = regex.exec(markdown)) !== null) {
     const src = match[1];
-    if (fs.existsSync(src)) {
-      paths.push(src);
+    const resolved = resolveProjectFile(src);
+    if (resolved) {
+      paths.push(resolved);
     }
   }
   return paths;
 }
 
+function excludeTailImagePaths(imagePaths, tailImage) {
+  if (!tailImage) return imagePaths;
+  const resolvedTail = path.resolve(tailImage);
+  return imagePaths.filter(imgPath => path.resolve(imgPath) !== resolvedTail);
+}
+
 /**
  * 创建平台 API 实例
  */
-function createAPI(platform) {
-  if (platform === 'toutiao') return new ToutiaoAPI();
-  if (platform === 'wechat') return new WechatAPI();
-  return new BaijiahaoAPI();
+function createAPI(platform, cookieStr) {
+  if (platform === 'toutiao') return new ToutiaoAPI(cookieStr);
+  if (platform === 'wechat') return new WechatAPI(cookieStr);
+  return new BaijiahaoAPI(cookieStr);
 }
 
 /**
@@ -156,7 +164,7 @@ function createAPI(platform) {
 async function pushWithImages(articlePath, imageDir, options = {}) {
   const platform = options.platform || 'baijiahao';
   const platformName = platform === 'toutiao' ? '头条' : platform === 'wechat' ? '公众号' : '百家号';
-  const api = createAPI(platform);
+  const api = createAPI(platform, options.cookieStr);
 
   // 仅在非批量模式下检查登录（批量模式已在启动时统一检查）
   if (!options._skipAuth) {
@@ -282,4 +290,4 @@ async function pushWithImages(articlePath, imageDir, options = {}) {
   return result;
 }
 
-module.exports = { pushWithImages, mdToHtml, extractImagePaths, DEFAULT_IMAGE_DIR, DEFAULT_TAIL_IMAGE };
+module.exports = { pushWithImages, mdToHtml, extractImagePaths, excludeTailImagePaths, DEFAULT_IMAGE_DIR, DEFAULT_TAIL_IMAGE };

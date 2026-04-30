@@ -8,6 +8,7 @@ const path = require('path');
 const { callLLM } = require('./llm');
 const { listImagesByGroup } = require('./image-library');
 const { getCategory } = require('./categories');
+const { toPortableProjectPath, normalizeMarkdownLocalImagePaths } = require('./local-file-utils');
 
 const RANKING_CATEGORY = '数字盘点类';
 const RANKING_SELF_CORRECTION_REGEX = /不对[，。！？、… ]|重新来|重新整理|咱们重新|哦对了|等等[，。！？、… ]|推翻重来/;
@@ -325,7 +326,8 @@ function resolveImageNames(article, imageDir, work, allowedGroups) {
 
     // 已经是本地绝对路径或 URL，保留原样
     if ((ref.startsWith('/') && fs.existsSync(ref)) || ref.startsWith('http')) {
-      result += `![${alt}](${ref})`;
+      const portableRef = ref.startsWith('http') ? ref : toPortableProjectPath(ref);
+      result += `![${alt}](${portableRef})`;
       continue;
     }
 
@@ -351,10 +353,11 @@ function resolveImageNames(article, imageDir, work, allowedGroups) {
     usedImages.add(picked);
     matched.push({ name: ref, file: path.basename(picked) });
     console.log(`  ✓ 配图「${ref}」→ ${path.basename(picked)}`);
-    result += `![${alt}](${picked})`;
+    result += `![${alt}](${toPortableProjectPath(picked)})`;
   }
 
-  return { article: result, matched, missing };
+  const normalized = normalizeMarkdownLocalImagePaths(result);
+  return { article: normalized.markdown, matched, missing };
 }
 
 /**
@@ -400,7 +403,7 @@ async function generateArticle(topic, outline, work, characters, imageDir, categ
     article = await callLLM(basePrompt + retryFeedback, { maxTokens });
 
     if (!article) {
-      throw new Error('文章生成失败，请检查 DOUBAO_API_KEY');
+      throw new Error('文章生成失败，请检查 config.json 的 doubao_api_key');
     }
 
     if (category !== RANKING_CATEGORY) break;

@@ -8,7 +8,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const FormData = require('form-data');
-const env = require('./env');
+const { resolveProjectFile } = require('./local-file-utils');
 
 class WechatAPI {
   constructor(cookieStr) {
@@ -16,7 +16,7 @@ class WechatAPI {
     this.ticket = '';
 
 
-    const cookie = cookieStr || env.wechatCookie();
+    const cookie = cookieStr || '';
 
     this.client = axios.create({
       headers: {
@@ -63,6 +63,9 @@ class WechatAPI {
         const htmlMatch = resp.data.match(/token=(\d+)/);
         if (htmlMatch) {
           this.token = htmlMatch[1];
+          // 顺便提取粉丝数
+          const fanMatch = resp.data.match(/总用户数[\s\S]{0,100}?(\d[\d,]*)/);
+          if (fanMatch) this._userCount = parseInt(fanMatch[1].replace(/,/g, ''));
           return this.token;
         }
       }
@@ -79,6 +82,25 @@ class WechatAPI {
       }
       throw new Error(`获取 token 失败: ${e.message}`);
     }
+  }
+
+  /** 获取粉丝数（从首页 HTML 提取） */
+  async fetchUserCount() {
+    if (this._userCount) return this._userCount;
+    if (!this.token) await this.fetchToken();
+    if (this._userCount) return this._userCount;
+
+    try {
+      const { data } = await this.client.get(
+        `https://mp.weixin.qq.com/cgi-bin/home?t=home/index&lang=zh_CN&token=${this.token}`,
+        { maxRedirects: 5, validateStatus: s => s < 500 }
+      );
+      if (typeof data === 'string') {
+        const m = data.match(/total_friend_cnt:\s*'(\d+)'/);
+        if (m) { this._userCount = parseInt(m[1]); return this._userCount; }
+      }
+    } catch {}
+    return 0;
   }
 
   async fetchTicket() {
@@ -188,6 +210,86 @@ class WechatAPI {
     }
   }
 
+  // ==================== 收益数据 ====================
+
+  /**
+   * 拉取流量主收益概览
+   * 金额单位：分 → 转为元
+   */
+  async fetchRevenueOverview() {
+    if (!this.token) await this.fetchToken();
+
+    const { data } = await this.client.get(
+      'https://mp.weixin.qq.com/promotion/publisher/publisher_stat',
+      {
+        params: {
+          action: 'overview',
+          result_type: 1,
+          version: 'v2',
+          token: this.token,
+          appid: '',
+          spid: '',
+        },
+        headers: {
+          'Referer': `https://mp.weixin.qq.com/cgi-bin/frame?t=ad_system/common_frame&t1=publisher/publisher_overview&lang=zh_CN&token=${this.token}`,
+        },
+        maxRedirects: 5,
+        validateStatus: s => s < 500,
+      }
+    );
+
+    if (!data || data.yesterday_income === undefined) return null;
+
+    return {
+      yesterdayIncome: (data.yesterday_income || 0) / 100,
+      totalIncome: (data.total_income || 0) / 100,
+      lastWeekIncome: (data.last_week_income || 0) / 100,
+      lastMonthIncome: (data.last_month_income || 0) / 100,
+      yesterdayArticleStat: (data.yesterday_article_stat || []).map(a => ({
+        title: a.title,
+        date: a.send_date,
+        income: (a.total_income || 0) / 100,
+      })),
+    };
+  }
+
+  /**
+   * 获取当前微信号绑定的所有公众号列表
+   */
+  async fetchAccountList() {
+    if (!this.token) await this.fetchToken();
+
+    try {
+      const fingerprint = this.generateFingerprint();
+      const { data } = await this.client.get(
+        'https://mp.weixin.qq.com/cgi-bin/switchacct',
+        {
+          params: {
+            action: 'get_acct_list',
+            fingerprint,
+            token: this.token,
+            lang: 'zh_CN',
+            f: 'json',
+            ajax: 1,
+          },
+          maxRedirects: 5,
+          validateStatus: s => s < 500,
+        }
+      );
+
+      const list = data?.biz_list?.list || [];
+      return list.map(a => ({
+        nickname: a.nickname,
+        bizuin: a.bizuin,
+        username: a.username,
+        headimgurl: a.headimgurl,
+        isAdmin: a.is_admin === 1,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
   // ==================== 草稿管理 ====================
 
   // ==================== 文章统计 ====================
@@ -236,7 +338,7 @@ class WechatAPI {
    * @returns {{ byRead: Array }}
    */
   async fetchTopArticles(topN = 10) {
-    const cacheDir = path.join(__dirname, '..', 'data');
+    const cacheDir = path.join(__dirname, '../..', 'data');
     const cachePath = path.join(cacheDir, 'wx_articles_cache.json');
 
     // 读取现有缓存
@@ -950,10 +1052,9 @@ class WechatAPI {
       const decodedSrc = decodeURIComponent(src);
 
       let uploaded = null;
-      if (fs.existsSync(decodedSrc)) {
-        uploaded = await this.uploadImage(decodedSrc);
-      } else if (fs.existsSync(src)) {
-        uploaded = await this.uploadImage(src);
+      const resolvedLocal = resolveProjectFile(decodedSrc) || resolveProjectFile(src);
+      if (resolvedLocal) {
+        uploaded = await this.uploadImage(resolvedLocal);
       } else if (src.startsWith('http')) {
         uploaded = await this.uploadImageFromUrl(src);
       }

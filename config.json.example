@@ -1,0 +1,74 @@
+{
+  "doubao_api_key": "你的豆包 API Key",
+  "doubao_model": "doubao-seed-1-8-251228",
+  "image_dir": "./images",
+  "tail_image": "./images/cover.jpg",
+  "chrome_path": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+
+  "works": {
+        "三国演义": 4,
+        "水浒传": 4,
+        "西游记": 4,
+        "射雕英雄传": 3,
+        "神雕侠侣": 3,
+        "天龙八部": 3,
+        "笑傲江湖": 3,
+        "鹿鼎记": 3,
+        "倚天屠龙记": 4,
+        "侠客行": 3,
+        "连城诀": 3,
+        "碧血剑": 3,
+        "书剑恩仇录": 4,
+        "雪山飞狐": 3,
+        "西游记后传": 3
+  },
+  "platforms": ["baijiahao", "toutiao", "wechat"],
+  "publish": false,
+  "interval": 30,
+
+  "toutiao": {
+    "cookie": "你的头条号 Cookie"
+  },
+
+  "baijiahao": {
+    "daily_rounds": 5,
+    "accounts": [
+      {
+        "name": "账号1",
+        "cookie": "你的百家号 Cookie",
+        "works": {
+          "西游记": {
+            "count": 1,
+            "notionUrl": "https://www.notion.so/xxx",
+            "image_dirs": ["西游记"]
+          }
+        }
+      }
+    ]
+  },
+
+  "wechat": {
+    "accounts": [
+      {
+        "name": "公众号1",
+        "cookie": "你的公众号 Cookie",
+        "author": "作者名",
+        "writer_id": "作者ID",
+        "combine": true,
+        "hot_articles_reference": [
+          "黄药师为何独独不认杨过？",
+          "梁山真正看透宋江的人是谁？"
+        ],
+        "works": {
+          "西游记": {
+            "count": 1,
+            "album_id": "合集ID",
+            "album_title": "合集标题",
+            "image_dirs": ["西游记"],
+            "notionUrl": "https://www.notion.so/xxx"
+          }
+        }
+      }
+    ]
+  }
+}

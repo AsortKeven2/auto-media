@@ -8,7 +8,7 @@ const fm = require('front-matter');
 const yaml = require('js-yaml');
 
 function getArticlesDir() {
-  const dir = path.resolve(__dirname, '..', 'archive', 'baijiahao');
+  const dir = path.resolve(__dirname, '../..', 'archive', 'baijiahao');
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   return dir;
 }

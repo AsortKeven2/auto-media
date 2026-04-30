@@ -4,10 +4,12 @@ const path = require('path');
 const { fetchNotionPage, fetchNotionDirectory } = require('./notion-fetcher');
 const { insertImages } = require('./article-generator');
 const { DEFAULT_IMAGE_DIR } = require('./batch-publish');
+const { normalizeMarkdownLocalImagePaths } = require('./local-file-utils');
 
-const BJH_SYNC_STATE_FILE = path.join(__dirname, '..', 'bjh-sync-state.json');
-const LEGACY_BJH_SYNC_STATE_FILE = path.join(__dirname, '..', '.bjh-sync-state.json');
-const LOCAL_SYNC_ROOT_DIR = path.join(__dirname, '..', 'archive', 'notion-sync');
+const REPO_ROOT_DIR = path.join(__dirname, '../..');
+const BJH_SYNC_STATE_FILE = path.join(__dirname, '../..', 'bjh-sync-state.json');
+const LEGACY_BJH_SYNC_STATE_FILE = path.join(__dirname, '../..', '.bjh-sync-state.json');
+const LOCAL_SYNC_ROOT_DIR = path.join(__dirname, '../..', 'archive', 'notion-sync');
 
 function readStateJson(filePath) {
   if (!fs.existsSync(filePath)) return { exists: false, data: {} };
@@ -63,8 +65,63 @@ function ensureDir(dir) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
+function toPortableLocalFilePath(filePath) {
+  return path.relative(REPO_ROOT_DIR, filePath);
+}
+
+function resolveStoredLocalFile(entry) {
+  if (!entry || !entry.work) return null;
+
+  const candidates = [];
+  const raw = entry.local_file;
+  if (raw) {
+    if (path.isAbsolute(raw)) {
+      candidates.push(raw);
+      candidates.push(path.join(getWorkSyncDir(entry.work), path.basename(raw)));
+    } else {
+      candidates.push(path.join(REPO_ROOT_DIR, raw));
+      candidates.push(path.join(getWorkSyncDir(entry.work), path.basename(raw)));
+    }
+  }
+
+  if (entry.notion_page_id && entry.title) {
+    candidates.push(buildLocalMarkdownPath(entry.work, entry.notion_page_id, entry.title));
+  }
+
+  for (const candidate of candidates) {
+    if (candidate && fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function normalizeStateEntries(state) {
+  let changed = false;
+
+  for (const entry of Object.values(state)) {
+    if (!entry || !entry.work) continue;
+    const resolved = resolveStoredLocalFile(entry);
+    if (!resolved) continue;
+
+    const portable = toPortableLocalFilePath(resolved);
+    if (entry.local_file !== portable) {
+      entry.local_file = portable;
+      changed = true;
+    }
+  }
+
+  return { state, changed };
+}
+
 function loadBjhSyncState() {
-  return resolveBjhSyncStateFile().data;
+  const resolved = resolveBjhSyncStateFile();
+  const normalized = normalizeStateEntries(resolved.data || {});
+  if (normalized.changed) {
+    fs.writeFileSync(resolved.file, JSON.stringify(normalized.state, null, 2), 'utf-8');
+  }
+  return normalized.state;
 }
 
 function saveBjhSyncState(state) {
@@ -74,6 +131,22 @@ function saveBjhSyncState(state) {
 
 function getBjhSyncStateFile() {
   return resolveBjhSyncStateFile().file;
+}
+
+/**
+ * 按账号过滤 state 记录
+ * accountName 为 "default" 或空时匹配无 account 字段的旧记录
+ */
+function filterStateByAccount(state, accountName) {
+  if (!accountName) return state;
+  const filtered = {};
+  for (const [key, entry] of Object.entries(state)) {
+    const entryAccount = entry.account || 'default';
+    if (entryAccount === accountName) {
+      filtered[key] = entry;
+    }
+  }
+  return filtered;
 }
 
 function buildNotionPageUrl(pageId) {
@@ -93,10 +166,15 @@ function buildLocalMarkdownPath(workName, pageId, title) {
 }
 
 function readLocalMarkdown(filePath) {
-  return fs.readFileSync(filePath, 'utf-8');
+  const raw = fs.readFileSync(filePath, 'utf-8');
+  const normalized = normalizeMarkdownLocalImagePaths(raw);
+  if (normalized.changed) {
+    fs.writeFileSync(filePath, normalized.markdown, 'utf-8');
+  }
+  return normalized.markdown;
 }
 
-function createStateEntry({ existing, pageId, title, workName, localFile }) {
+function createStateEntry({ existing, pageId, title, workName, localFile, accountName }) {
   const nextStatus = existing?.status === 'published' ? 'published' : 'synced';
   const entry = {
     ...(existing || {}),
@@ -104,10 +182,14 @@ function createStateEntry({ existing, pageId, title, workName, localFile }) {
     work: workName,
     notion_page_id: pageId,
     notion_page_url: buildNotionPageUrl(pageId),
-    local_file: localFile,
+    local_file: toPortableLocalFilePath(localFile),
     synced_at: new Date().toISOString(),
     status: nextStatus,
   };
+
+  if (accountName) {
+    entry.account = accountName;
+  }
 
   if (nextStatus !== 'publish_failed') {
     delete entry.last_error;
@@ -124,17 +206,26 @@ async function ensureLocalMarkdownSynced({
   imageDir = DEFAULT_IMAGE_DIR,
   autoImages = true,
   state,
+  accountName,
 }) {
   const existing = state?.[pageId];
-  if (existing?.local_file && fs.existsSync(existing.local_file)) {
+  const resolvedExistingLocalFile = resolveStoredLocalFile(existing);
+  if (resolvedExistingLocalFile) {
     return {
       pageId,
       title: existing.title || pageTitle,
-      markdown: readLocalMarkdown(existing.local_file),
-      localFile: existing.local_file,
+      markdown: readLocalMarkdown(resolvedExistingLocalFile),
+      localFile: resolvedExistingLocalFile,
       imageStats: { matched: [], missing: [] },
       reused: true,
-      stateEntry: existing,
+      stateEntry: createStateEntry({
+        existing,
+        pageId,
+        title: existing.title || pageTitle,
+        workName,
+        localFile: resolvedExistingLocalFile,
+        accountName,
+      }),
     };
   }
 
@@ -149,9 +240,12 @@ async function ensureLocalMarkdownSynced({
     imageStats = result.imageStats;
   }
 
+  markdown = normalizeMarkdownLocalImagePaths(markdown).markdown;
+
   const localFile = buildLocalMarkdownPath(workName, pageId, title);
-  if (existing?.local_file && existing.local_file !== localFile && fs.existsSync(existing.local_file)) {
-    try { fs.unlinkSync(existing.local_file); } catch {}
+  const oldFile = resolveStoredLocalFile(existing);
+  if (oldFile && oldFile !== localFile) {
+    try { fs.unlinkSync(oldFile); } catch {}
   }
   fs.writeFileSync(localFile, markdown, 'utf-8');
 
@@ -162,11 +256,11 @@ async function ensureLocalMarkdownSynced({
     localFile,
     imageStats,
     reused: false,
-    stateEntry: createStateEntry({ existing, pageId, title, workName, localFile }),
+    stateEntry: createStateEntry({ existing, pageId, title, workName, localFile, accountName }),
   };
 }
 
-async function syncNotionWorkToLocal(workName, workConfig, opts = {}) {
+async function syncNotionWorkToLocal(workName, workConfig, opts = {}, accountName) {
   const imageDir = path.resolve(opts.images || DEFAULT_IMAGE_DIR);
   const allowedGroups = workConfig.image_dirs || [workName];
   const intervalMs = parseInt(opts.interval || '15', 10) * 1000;
@@ -233,13 +327,14 @@ async function syncNotionWorkToLocal(workName, workConfig, opts = {}) {
         imageDir,
         autoImages: opts.autoImages !== false,
         state,
+        accountName,
       });
 
       state[child.id] = result.stateEntry;
       saveBjhSyncState(state);
       success++;
 
-      console.log(`  ✓ 已同步到本地: ${path.relative(path.join(__dirname, '..'), result.localFile)}`);
+      console.log(`  ✓ 已同步到本地: ${path.relative(path.join(__dirname, '../..'), result.localFile)}`);
       if (result.imageStats.missing.length) {
         console.log(`  缺失: ${result.imageStats.missing.join('、')}`);
       }
@@ -258,9 +353,11 @@ module.exports = {
   loadBjhSyncState,
   saveBjhSyncState,
   getBjhSyncStateFile,
+  filterStateByAccount,
   buildNotionPageUrl,
   buildLocalMarkdownPath,
   readLocalMarkdown,
+  resolveStoredLocalFile,
   ensureLocalMarkdownSynced,
   syncNotionWorkToLocal,
 };

@@ -3,13 +3,13 @@
  */
 
 const axios = require('axios');
-const env = require('./env');
+const config = require('./config');
 
 async function callLLM(prompt, options = {}) {
   const { maxTokens = 4000, retries = 3 } = options;
-  const apiKey = env.doubaoKey();
+  const apiKey = config.doubaoKey();
   if (!apiKey) {
-    console.error('DOUBAO_API_KEY 未配置');
+    console.error('config.json 未配置 doubao_api_key');
     return null;
   }
 
@@ -18,7 +18,7 @@ async function callLLM(prompt, options = {}) {
       const { data } = await axios.post(
         'https://ark.cn-beijing.volces.com/api/v3/chat/completions',
         {
-          model: env.doubaoModel(),
+          model: config.doubaoModel(),
           messages: [{ role: 'user', content: prompt }],
           max_tokens: maxTokens,
           thinking: { type: 'disabled' },

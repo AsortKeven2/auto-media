@@ -7,17 +7,25 @@ const { Command } = require('commander');
 const path = require('path');
 const fs = require('fs');
 
-const { generateTopics, listWorks } = require('./topic-generator');
-const { generateOutline, formatOutline } = require('./outline-generator');
-const { generateArticle, insertImages, detectWorksFromTitle } = require('./article-generator');
-const { listArticles, updateMeta, createArticle, importArticle } = require('./content-manager');
-const { pushWithImages, mdToHtml, extractImagePaths, DEFAULT_IMAGE_DIR, DEFAULT_TAIL_IMAGE } = require('./batch-publish');
-const { BaijiahaoAPI, saveCookie } = require('./baijiahao-api');
-const { ToutiaoAPI } = require('./toutiao-api');
-const { WechatAPI } = require('./wechat-api');
-const { fetchNotionPage } = require('./notion-fetcher');
-const { scanImages, selectCoverImage } = require('./image-library');
-const { callLLM } = require('./llm');
+const { generateTopics, listWorks } = require('../core/topic-generator');
+const { generateOutline, formatOutline } = require('../core/outline-generator');
+const { generateArticle, insertImages, detectWorksFromTitle } = require('../core/article-generator');
+const { listArticles, updateMeta, createArticle, importArticle } = require('../core/content-manager');
+const { pushWithImages, mdToHtml, extractImagePaths, excludeTailImagePaths, DEFAULT_IMAGE_DIR, DEFAULT_TAIL_IMAGE } = require('../core/batch-publish');
+const { BaijiahaoAPI } = require('../core/baijiahao-api');
+const { ToutiaoAPI } = require('../core/toutiao-api');
+const { WechatAPI } = require('../core/wechat-api');
+const { fetchNotionPage } = require('../core/notion-fetcher');
+const { scanImages, selectCoverImage } = require('../core/image-library');
+const { loadPlatformAccounts, filterAccounts, getAccountCookie } = require('../core/account-config');
+const { loadConfig, saveConfig, toutiaoCookie } = require('../core/config');
+const {
+  PUBLISH_RECORD_DIR,
+  loadOrCreateDailyRecord,
+  getDailyBatchPlan,
+  buildDailyBatchEntries,
+  decrementDailyRecord,
+} = require('../core/daily-publish-record');
 
 // ==================== 缺失图片日志 ====================
 
@@ -32,13 +40,13 @@ function parsePlatforms(opt) {
 }
 
 /** 创建平台 API 实例 */
-function createPlatformAPI(p) {
-  if (p === 'toutiao') return new ToutiaoAPI();
-  if (p === 'wechat') return new WechatAPI();
-  return new BaijiahaoAPI();
+function createPlatformAPI(p, cookieStr) {
+  if (p === 'toutiao') return new ToutiaoAPI(cookieStr);
+  if (p === 'wechat') return new WechatAPI(cookieStr);
+  return new BaijiahaoAPI(cookieStr);
 }
 
-const MISSING_IMAGES_LOG_DIR = path.join(__dirname, '..', 'logs', 'missing-images');
+const MISSING_IMAGES_LOG_DIR = path.join(__dirname, '../..', 'logs', 'missing-images');
 
 /**
  * 记录缺失图片到对应作品的日志文件
@@ -69,45 +77,83 @@ program
   .description('设置 Cookie（从浏览器复制）')
   .argument('<cookie>', 'Cookie 字符串')
   .option('-p, --platform <name>', '平台: baijiahao / toutiao / wechat', 'baijiahao')
+  .option('-a, --account <name>', '指定账号名称（多账号模式）')
   .action((cookie, opts) => {
-    const envPath = path.join(__dirname, '..', '.env.local');
-    if (opts.platform === 'toutiao' || opts.platform === 'wechat') {
-      const envKey = opts.platform === 'toutiao' ? 'TOUTIAO_COOKIE' : 'WECHAT_COOKIE';
-      const platName = opts.platform === 'toutiao' ? '头条' : '公众号';
-      const raw = fs.readFileSync(envPath, 'utf-8');
-      const lines = raw.split('\n');
-      let replaced = false;
-      for (let i = 0; i < lines.length; i++) {
-        if (lines[i].trim().startsWith(`${envKey}=`)) {
-          lines[i] = `${envKey}=${cookie.trim()}`;
-          replaced = true;
-          break;
-        }
-      }
-      if (!replaced) lines.push(`${envKey}=${cookie.trim()}`);
-      fs.writeFileSync(envPath, lines.join('\n'), 'utf-8');
-      console.log(`${platName} Cookie 已更新到 .env.local`);
-    } else {
-      saveCookie(cookie);
+    const cfg = loadConfig();
+
+    if (opts.platform === 'toutiao') {
+      if (!cfg.toutiao) cfg.toutiao = {};
+      cfg.toutiao.cookie = cookie.trim();
+      saveConfig(cfg);
+      console.log('头条号 Cookie 已更新到 config.json');
+      return;
     }
+
+    // 百家号/微信：多账号模式
+    const platform = opts.platform;
+    if (!cfg[platform]) cfg[platform] = {};
+    const accounts = cfg[platform].accounts || [];
+
+    if (opts.account) {
+      const matched = accounts.find(a => a.name === opts.account);
+      if (!matched) {
+        console.error(`未找到账号 "${opts.account}"，可用账号: ${accounts.map(a => a.name).join('、')}`);
+        return;
+      }
+      matched.cookie = cookie.trim();
+    } else if (accounts.length === 1) {
+      accounts[0].cookie = cookie.trim();
+    } else if (accounts.length > 1) {
+      console.error(`有多个账号，请用 --account 指定: ${accounts.map(a => a.name).join('、')}`);
+      return;
+    } else {
+      // 无 accounts，直接写到平台级 cookie
+      cfg[platform].cookie = cookie.trim();
+    }
+
+    saveConfig(cfg);
+    console.log(`${platformLabel(platform)} Cookie 已更新到 config.json`);
   });
 
 program
   .command('check')
   .description('检查登录状态')
   .option('-p, --platform <name>', '平台: baijiahao / toutiao / wechat / all', 'all')
+  .option('-a, --account <name>', '指定账号名称（多账号模式）')
   .action(async (opts) => {
     if (opts.platform === 'all' || opts.platform === 'baijiahao') {
-      const bjh = new BaijiahaoAPI();
-      await bjh.checkAuth();
+      const accounts = filterAccounts(loadPlatformAccounts('baijiahao'), opts.account);
+      if (accounts.length) {
+        for (const account of accounts) {
+          const prefix = account.name !== 'default' ? `[${account.name}] ` : '';
+          const cookie = getAccountCookie(account);
+          const bjh = new BaijiahaoAPI(cookie);
+          console.log(`${prefix}百家号:`);
+          await bjh.checkAuth();
+        }
+      } else if (!opts.account) {
+        const bjh = new BaijiahaoAPI();
+        await bjh.checkAuth();
+      }
     }
     if (opts.platform === 'all' || opts.platform === 'toutiao') {
       const tt = new ToutiaoAPI();
       await tt.checkAuth();
     }
     if (opts.platform === 'all' || opts.platform === 'wechat') {
-      const wx = new WechatAPI();
-      await wx.checkAuth();
+      const accounts = filterAccounts(loadPlatformAccounts('wechat'), opts.account);
+      if (accounts.length) {
+        for (const account of accounts) {
+          const prefix = account.name !== 'default' ? `[${account.name}] ` : '';
+          const cookie = getAccountCookie(account);
+          const wx = new WechatAPI(cookie);
+          console.log(`${prefix}公众号:`);
+          await wx.checkAuth();
+        }
+      } else if (!opts.account) {
+        const wx = new WechatAPI();
+        await wx.checkAuth();
+      }
     }
   });
 
@@ -209,7 +255,7 @@ program
   .argument('<file>', '文章文件名（articles/ 目录下）')
   .argument('<status>', '新状态')
   .action((file, status) => {
-    const articlesDir = path.resolve(__dirname, '..', 'archive', 'baijiahao');
+    const articlesDir = path.resolve(__dirname, '../..', 'archive', 'baijiahao');
     const filePath = path.join(articlesDir, file);
     if (!fs.existsSync(filePath)) {
       console.error(`文件不存在: ${filePath}`);
@@ -266,28 +312,22 @@ program
 
 // ==================== 发布配置加载 ====================
 
-const PUBLISH_CONFIG_PATH = path.join(__dirname, '..', 'publish_config.json');
-
 /**
- * 加载发布配置，从 publish_config.json 读取
+ * 加载发布配置，从 config.json 读取
  */
 function loadPublishConfig() {
-  if (!fs.existsSync(PUBLISH_CONFIG_PATH)) {
-    console.error('未找到 publish_config.json，请先创建配置文件（参考 publish_config.json.example）');
-    return null;
-  }
-
   try {
-    const raw = JSON.parse(fs.readFileSync(PUBLISH_CONFIG_PATH, 'utf-8'));
-    console.log('  配置来源: publish_config.json');
+    const raw = loadConfig();
+    console.log('  配置来源: config.json');
     return {
       works: raw.works || {},
       platforms: raw.platforms || ['baijiahao', 'toutiao', 'wechat'],
       publish: raw.publish ?? false,
       interval: raw.interval ?? 30,
+      baijiahao: raw.baijiahao || {},
     };
   } catch (e) {
-    console.error(`publish_config.json 解析失败: ${e.message}`);
+    console.error(`config.json 加载失败: ${e.message}`);
     return null;
   }
 }
@@ -296,7 +336,7 @@ function loadPublishConfig() {
 
 program
   .command('batch')
-  .description('按 publish_config.json 批量生成并发布')
+  .description('按 config.json 批量生成并发布')
   .option('-i, --images <dir>', '图片素材目录', DEFAULT_IMAGE_DIR)
   .option('-t, --tail <file>', '尾图路径', DEFAULT_TAIL_IMAGE)
   .option('--interval <seconds>', '每篇推送间隔秒数（覆盖配置文件）')
@@ -304,6 +344,10 @@ program
   .option('--no-publish', '仅保存草稿（覆盖配置文件）')
   .option('--no-push', '仅生成文章，不推送')
   .option('-p, --platform <name>', '平台: baijiahao / toutiao / wechat / all（覆盖配置文件）')
+  .option('-a, --account <name>', '指定账号名称（多账号模式，仅百家号/微信）')
+  .option('--daily-record', '百家号分时发布模式：按 publish_record 记录当天剩余量')
+  .option('--rounds <n>', '分时发布模式下当天发布轮次（覆盖 config.json 的 baijiahao.daily_rounds）')
+  .option('--record-dir <dir>', '分时发布记录目录', PUBLISH_RECORD_DIR)
   .action(async (opts) => {
     const publishConfig = loadPublishConfig();
     if (!publishConfig) return;
@@ -313,9 +357,37 @@ program
     const intervalSec = opts.interval ? parseInt(opts.interval) : publishConfig.interval;
     const platforms = opts.platform ? parsePlatforms(opts.platform) : publishConfig.platforms;
 
-    const entries = Object.entries(publishConfig.works).filter(([, n]) => n > 0);
+    let dailyRecordContext = null;
+    if (opts.dailyRecord) {
+      if (!(platforms.length === 1 && platforms[0] === 'baijiahao')) {
+        console.error('百家号分时发布模式只支持 --platform baijiahao，不会改动微信/头条逻辑');
+        return;
+      }
+      if (opts.push !== false && !shouldPublish) {
+        console.error('百家号分时发布模式需要发布文章，请在 config.json 设置 publish=true 或运行时加 --publish');
+        return;
+      }
+
+      const configuredRounds = publishConfig.baijiahao.daily_rounds;
+      const roundsSource = opts.rounds !== undefined ? opts.rounds : configuredRounds;
+      const rounds = Math.max(1, parseInt(roundsSource, 10) || 5);
+      const { record, recordPath, created, deletedOldRecords } = loadOrCreateDailyRecord(publishConfig.works, {
+        recordDir: opts.recordDir,
+      });
+      const plan = getDailyBatchPlan(record, rounds);
+      dailyRecordContext = { record, recordPath, rounds, plan };
+
+      console.log(`  发布记录: ${recordPath}${created ? '（今日首次创建）' : ''}`);
+      deletedOldRecords.forEach(file => console.log(`  已删除旧发布记录: ${file}`));
+      console.log(`  今日剩余: ${record.remaining_total}/${record.total} 篇`);
+      console.log(`  今日配置: ${plan.roundsTotal} 轮，基础每轮 ${plan.baseBatchSize} 篇，本轮计划 ${plan.batchSize} 篇${plan.isFinalRound ? '（发送全部剩余）' : ''}`);
+    }
+
+    const entries = dailyRecordContext
+      ? buildDailyBatchEntries(dailyRecordContext.record, dailyRecordContext.plan.batchSize)
+      : Object.entries(publishConfig.works).filter(([, n]) => n > 0);
     if (!entries.length) {
-      console.log('配置中没有需要生成的作品（所有数量为0）');
+      console.log(dailyRecordContext ? '今日发布记录已清零，无需继续发布' : '配置中没有需要生成的作品（所有数量为0）');
       return;
     }
 
@@ -333,72 +405,43 @@ program
     console.log(`  发布: ${shouldPublish ? '自动发布' : '仅保存草稿'}`);
     console.log(`  间隔: ${intervalSec} 秒`);
     console.log(`  素材目录: ${imageDir}`);
+    if (dailyRecordContext) {
+      console.log(`  分时发布: 每天 ${dailyRecordContext.rounds} 轮，基础每轮 ${dailyRecordContext.plan.baseBatchSize} 篇，优先选择剩余量最多的作品`);
+    }
     console.log('='.repeat(60));
 
-    // 检查平台登录
+    // 检查平台登录 + 收集各平台账号的 API 实例
+    const platformAPIs = {}; // { platform: [{ api, account }] }
     if (opts.push !== false) {
       for (const p of platforms) {
-        const api = createPlatformAPI(p);
-        const auth = await api.checkAuth();
-        if (!auth.success) {
-          console.error(`\n${platformLabel(p)}登录状态无效，请先更新 Cookie`);
-          return;
-        }
-      }
-    }
-
-    // 热文分析（仅百家号平台）
-    let topArticlesHint = null;
-    if (platforms.includes('baijiahao')) {
-      try {
-        console.log('\n  分析热文数据...');
-        const bjhApi = new BaijiahaoAPI();
-        const { byClickRate, byRecLowClickRate } = await bjhApi.fetchTopArticles(10);
-
-        // 判断是否有有效数据
-        const hasData = byClickRate.length > 0;
-        if (hasData) {
-          const formatLine = (a, i) => `${i + 1}. 「${a.title}」 阅读:${a.read_amount} 推荐:${a.rec_amount} 点击率:${a.click_rate}`;
-
-          let analysisInput = '';
-          if (byClickRate.length) {
-            analysisInput += '【点击率最高的文章（标题吸引力强）】\n' + byClickRate.map(formatLine).join('\n') + '\n\n';
+        if (p === 'toutiao') {
+          const api = createPlatformAPI(p);
+          const auth = await api.checkAuth();
+          if (!auth.success) {
+            console.error(`\n${platformLabel(p)}登录状态无效，请先更新 Cookie`);
+            return;
           }
-          if (byRecLowClickRate.length) {
-            analysisInput += '【高推荐低点击率（平台认可内容但标题/封面不够吸引人）】\n' + byRecLowClickRate.map(formatLine).join('\n') + '\n\n';
-          }
-
-          console.log(`  已获取热文数据`);
-          byClickRate.slice(0, 3).forEach((a, i) => {
-            console.log(`    ${i + 1}. ${a.title} (阅读${a.read_amount} 推荐${a.rec_amount} 点击率${a.click_rate})`);
-          });
-
-          topArticlesHint = await callLLM(
-            `分析以下百家号已发布文章的数据，重点关注阅读量和推荐量的关系：
-
-${analysisInput}
-说明：
-- 推荐量高+阅读量高+点击率高 = 标题吸引人，内容也好，是最佳范本
-- 推荐量高+阅读量低+点击率低 = 平台认可内容质量给了推荐，但标题或封面不够吸引人，用户不愿点击
-- 点击率 = 阅读量/推荐量，越高说明标题越能吸引点击
-
-请从以下维度分析（简洁，每点1-2句话）：
-1. 高点击率文章的标题共性（句式、用词、悬念感）
-2. 低点击率文章的标题问题在哪（对比高点击率找差距）
-3. 哪些选题方向/作品/角色更受欢迎
-4. 对后续选题和写作的3条具体建议（重点是如何提高点击率）
-
-直接输出分析，不要超过400字。`,
-            { maxTokens: 600 }
-          );
-          if (topArticlesHint) {
-            console.log('  热文分析完成');
-          }
+          platformAPIs[p] = [{ api, account: null }];
         } else {
-          console.log('  文章数据暂无（推荐/阅读均为0），跳过热文分析');
+          // 百家号/微信：多账号
+          const accounts = filterAccounts(loadPlatformAccounts(p), opts.account);
+          if (!accounts.length) {
+            console.error(`\n${platformLabel(p)}没有可用的账号配置`);
+            return;
+          }
+          platformAPIs[p] = [];
+          for (const account of accounts) {
+            const prefix = account.name !== 'default' ? `[${account.name}] ` : '';
+            const cookie = getAccountCookie(account);
+            const api = createPlatformAPI(p, cookie);
+            const auth = await api.checkAuth();
+            if (!auth.success) {
+              console.error(`\n${prefix}${platformLabel(p)}登录状态无效，请先更新 config.json 中该账号的 cookie`);
+              return;
+            }
+            platformAPIs[p].push({ api, account });
+          }
         }
-      } catch (e) {
-        console.error(`  热文分析失败（不影响生成）: ${e.message}`);
       }
     }
 
@@ -413,10 +456,10 @@ ${analysisInput}
       console.log('#'.repeat(60));
 
       // 为该作品生成选题（不足时重试一次补齐）
-      let topics = await generateTopics(count, work, 'baijiahao', topArticlesHint);
+      let topics = await generateTopics(count, work, 'baijiahao');
       if (topics.length < count && topics.length > 0) {
         console.log(`  选题不足 ${topics.length}/${count}，补充生成中...`);
-        const extra = await generateTopics(count - topics.length, work, 'baijiahao', topArticlesHint);
+        const extra = await generateTopics(count - topics.length, work, 'baijiahao');
         topics = topics.concat(extra);
       }
       if (!topics.length) {
@@ -445,7 +488,7 @@ ${analysisInput}
             imageDir,
             t.category,
             t.related_works,
-            { wordCount: '1500-2000', maxTokens: 4000, topArticlesHint }
+            { wordCount: '1500-2000', maxTokens: 4000 }
           );
           const wordCount = content.replace(/\s/g, '').replace(/[#*\-\[\]()]/g, '').length;
           console.log(`  生成完成: ${wordCount} 字`);
@@ -492,26 +535,36 @@ ${analysisInput}
         }
         lastPublishTime = Date.now();
 
-        // 推送到各平台
+        // 推送到各平台（多账号：每个账号都推送）
         let anySuccess = false;
         const urls = [];
         for (const p of platforms) {
-          const pName = platformLabel(p);
-          console.log(`  >>> 推送到${pName}...`);
-          try {
-            const result = await pushWithImages(filePath, imageDir, {
-              tail: opts.tail,
-              minImages: 7,
-              publish: (p === 'baijiahao' || p === 'wechat') ? shouldPublish : false,
-              platform: p,
-              _skipAuth: true,
-            });
-            if (result && result.success) {
-              anySuccess = true;
-              urls.push(`${pName}: ${result.publish_url || result.draft_url}`);
+          const apiEntries = platformAPIs[p] || [];
+          for (const { api: pApi, account: pAccount } of apiEntries) {
+            const pName = platformLabel(p);
+            const prefix = pAccount && pAccount.name !== 'default' ? `[${pAccount.name}] ` : '';
+            console.log(`  >>> 推送到${prefix}${pName}...`);
+            try {
+              const cookie = pAccount ? getAccountCookie(pAccount) : undefined;
+              const result = await pushWithImages(filePath, imageDir, {
+                tail: opts.tail,
+                minImages: 7,
+                publish: (p === 'baijiahao' || p === 'wechat') ? shouldPublish : false,
+                platform: p,
+                cookieStr: cookie,
+                _skipAuth: true,
+              });
+              const publishRequired = shouldPublish && (p === 'baijiahao' || p === 'wechat');
+              const pushSucceeded = result && result.success && (!publishRequired || result.published === true);
+              if (pushSucceeded) {
+                anySuccess = true;
+                urls.push(`${prefix}${pName}: ${result.publish_url || result.draft_url}`);
+              } else if (result && result.success && publishRequired) {
+                console.error(`  ${prefix}${pName}发布未成功，不计入本次成功`);
+              }
+            } catch (e) {
+              console.error(`  ${prefix}${pName}推送失败: ${e.message}`);
             }
-          } catch (e) {
-            console.error(`  ${pName}推送失败: ${e.message}`);
           }
         }
 
@@ -521,6 +574,15 @@ ${analysisInput}
             status: shouldPublish ? 'published' : 'draft_saved',
             published_at: new Date().toISOString(),
           });
+
+          if (dailyRecordContext && shouldPublish && opts.push !== false) {
+            const remain = decrementDailyRecord(
+              dailyRecordContext.recordPath,
+              dailyRecordContext.record,
+              work
+            );
+            console.log(`  发布记录已更新: ${work} 剩余 ${remain} 篇，今日总剩余 ${dailyRecordContext.record.remaining_total} 篇`);
+          }
         }
         allResults.push({ work, title: path.basename(filePath), success: anySuccess, urls: urls.join(' | ') });
       }
@@ -557,19 +619,42 @@ program
   .option('--interval <seconds>', '每篇推送间隔秒数', '30')
   .option('--publish', '自动发布（不仅保存草稿）')
   .option('-p, --platform <name>', '平台: baijiahao / toutiao / wechat / all', 'all')
+  .option('-a, --account <name>', '指定账号名称（多账号模式）')
   .action(async (opts) => {
     const imageDir = path.resolve(opts.images);
     const interval = parseInt(opts.interval) * 1000;
     const platforms = parsePlatforms(opts.platform);
     const platformNames = platforms.map(platformLabel).join(' + ');
 
-    // 检查所有平台登录状态
+    // 检查所有平台登录状态 + 收集 API 实例
+    const platformAPIs = {};
     for (const p of platforms) {
-      const api = createPlatformAPI(p);
-      const auth = await api.checkAuth();
-      if (!auth.success) {
-        console.error(`${platformLabel(p)}登录状态无效，请先更新 Cookie`);
-        return;
+      if (p === 'toutiao') {
+        const api = createPlatformAPI(p);
+        const auth = await api.checkAuth();
+        if (!auth.success) {
+          console.error(`${platformLabel(p)}登录状态无效，请先更新 Cookie`);
+          return;
+        }
+        platformAPIs[p] = [{ api, account: null }];
+      } else {
+        const accounts = filterAccounts(loadPlatformAccounts(p), opts.account);
+        if (!accounts.length) {
+          console.error(`${platformLabel(p)}没有可用的账号配置`);
+          return;
+        }
+        platformAPIs[p] = [];
+        for (const account of accounts) {
+          const prefix = account.name !== 'default' ? `[${account.name}] ` : '';
+          const cookie = getAccountCookie(account);
+          const api = createPlatformAPI(p, cookie);
+          const auth = await api.checkAuth();
+          if (!auth.success) {
+            console.error(`${prefix}${platformLabel(p)}登录状态无效，请先更新 Cookie`);
+            return;
+          }
+          platformAPIs[p].push({ api, account });
+        }
       }
     }
 
@@ -592,22 +677,28 @@ program
 
       let anySuccess = false;
       for (const p of platforms) {
-        const pName = platformLabel(p);
-        console.log(`>>> 推送到${pName}...`);
-        try {
-          const result = await pushWithImages(articles[i].filePath, imageDir, {
-            tail: opts.tail,
-            minImages: 7,
-            publish: (p === 'baijiahao' || p === 'wechat') ? !!opts.publish : false,
-            platform: p,
-            _skipAuth: true,
-          });
+        const apiEntries = platformAPIs[p] || [];
+        for (const { account: pAccount } of apiEntries) {
+          const pName = platformLabel(p);
+          const prefix = pAccount && pAccount.name !== 'default' ? `[${pAccount.name}] ` : '';
+          console.log(`>>> 推送到${prefix}${pName}...`);
+          try {
+            const cookie = pAccount ? getAccountCookie(pAccount) : undefined;
+            const result = await pushWithImages(articles[i].filePath, imageDir, {
+              tail: opts.tail,
+              minImages: 7,
+              publish: (p === 'baijiahao' || p === 'wechat') ? !!opts.publish : false,
+              platform: p,
+              cookieStr: cookie,
+              _skipAuth: true,
+            });
 
-          if (result && result.success) {
-            anySuccess = true;
+            if (result && result.success) {
+              anySuccess = true;
+            }
+          } catch (e) {
+            console.error(`${prefix}${pName}推送失败: ${e.message}`);
           }
-        } catch (e) {
-          console.error(`${pName}推送失败: ${e.message}`);
         }
       }
 
@@ -702,7 +793,7 @@ program
     let html = mdToHtml(finalMarkdown, 'wechat');
 
     // 6. 封面：标题角色图 > 文中最佳比例图
-    const imagePaths = extractImagePaths(finalMarkdown);
+    const imagePaths = excludeTailImagePaths(extractImagePaths(finalMarkdown), tailImage);
     let coverUrl = null;
     let coverPath = null;
     if (opts.cover && fs.existsSync(opts.cover)) {

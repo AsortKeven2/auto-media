@@ -7,14 +7,14 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const FormData = require('form-data');
-const env = require('./env');
+const { resolveProjectFile } = require('./local-file-utils');
 
 class BaijiahaoAPI {
   constructor(cookieStr) {
     this.authToken = '';
     this.userInfo = null;
 
-    const cookie = cookieStr || env.cookie();
+    const cookie = cookieStr || '';
 
     this.client = axios.create({
       headers: {
@@ -516,10 +516,9 @@ class BaijiahaoAPI {
       const decodedSrc = decodeURIComponent(src);
 
       let newUrl = null;
-      if (fs.existsSync(decodedSrc)) {
-        newUrl = await this.uploadImage(decodedSrc);
-      } else if (fs.existsSync(src)) {
-        newUrl = await this.uploadImage(src);
+      const resolvedLocal = resolveProjectFile(decodedSrc) || resolveProjectFile(src);
+      if (resolvedLocal) {
+        newUrl = await this.uploadImage(resolvedLocal);
       } else if (src.startsWith('http')) {
         newUrl = await this.uploadImageFromUrl(src);
       }
@@ -547,8 +546,4 @@ class BaijiahaoAPI {
   }
 }
 
-function saveCookie(cookieStr) {
-  env.updateCookie(cookieStr);
-}
-
-module.exports = { BaijiahaoAPI, saveCookie };
+module.exports = { BaijiahaoAPI };

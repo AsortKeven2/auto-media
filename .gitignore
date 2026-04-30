@@ -11,9 +11,11 @@ images/
 archive/
 # 运行日志
 logs/
+publish_record/
 
 # 作品配置（含 Notion 链接等个人数据）
 publish_config.json
+config.json
 
 # 同步状态
 .wx-sync-state.json

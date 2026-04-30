@@ -8,9 +8,9 @@ const path = require('path');
 const { callLLM } = require('./llm');
 const { buildCategoryPromptSection, CATEGORIES } = require('./categories');
 
-const DATA_DIR = path.join(__dirname, '..', 'data');
-const ARTICLES_DIR = path.join(__dirname, '..', 'archive', 'baijiahao');
-const PUBLISH_CONFIG_PATH = path.join(__dirname, '..', 'publish_config.json');
+const DATA_DIR = path.join(__dirname, '../..', 'data');
+const ARTICLES_DIR = path.join(__dirname, '../..', 'archive', 'baijiahao');
+const { loadConfig } = require('./config');
 
 /**
  * 加载按作品分组的历史选题
@@ -124,18 +124,19 @@ async function generateTopics(count = 10, workFilter = null, platform = 'baijiah
     ? '\n已有选题（请勿重复或相似）：\n' + novelHistory.map(t => `- ${t}`).join('\n')
     : '';
 
+  const platformLabel = platform === 'wechat' ? '微信公众号' : '百家号/头条号';
   const categoryText = buildCategoryPromptSection();
 
-  const platformLabel = platform === 'wechat' ? '微信公众号' : '百家号/头条号';
-
   // ── 热文/正常分配由调用方通过 explicitHotCount 决定 ──
-  const hotCount = (topArticlesHint && explicitHotCount !== null) ? Math.min(explicitHotCount, count) : 0;
+  const hotCount = (platform === 'wechat' && topArticlesHint && explicitHotCount !== null)
+    ? Math.min(explicitHotCount, count)
+    : 0;
   const normalCount = count - hotCount;
   if (hotCount > 0) {
     console.log(`  混合模式：${hotCount} 条热文风格 + ${normalCount} 条正常分类`);
   }
 
-  // 本地随机分配类别（仅用于 normalCount 部分，排除"热文风格"）
+  // 本地随机分配类别，热文风格只服务于公众号热文参考，不参与常规随机选题。
   const categoryNames = Object.keys(CATEGORIES).filter(c => c !== '热文风格');
   const assignedCategories = [];
   let shuffled = [...categoryNames].sort(() => Math.random() - 0.5);
@@ -153,14 +154,24 @@ async function generateTopics(count = 10, workFilter = null, platform = 'baijiah
 
   // ── 辅助：解析 AI 返回并收集结果 ──
   function parseAndCollect(content, maxCount, getCategoryFn) {
-    const jsonMatch = content.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) {
+    // 尝试提取 JSON 数组：先找第一个 [，再通过括号平衡找到匹配的 ]
+    let jsonStr = null;
+    const startIdx = content.indexOf('[');
+    if (startIdx !== -1) {
+      let depth = 0;
+      for (let i = startIdx; i < content.length; i++) {
+        if (content[i] === '[') depth++;
+        else if (content[i] === ']') depth--;
+        if (depth === 0) { jsonStr = content.slice(startIdx, i + 1); break; }
+      }
+    }
+    if (!jsonStr) {
       console.error(`  选题解析失败 — AI 返回格式异常，内容: ${content.slice(0, 200)}`);
       return;
     }
     let topics;
     try {
-      topics = JSON.parse(jsonMatch[0]).slice(0, maxCount);
+      topics = JSON.parse(jsonStr).slice(0, maxCount);
     } catch (parseErr) {
       console.error(`  选题解析失败 — JSON 解析失败: ${parseErr.message}`);
       return;
@@ -320,18 +331,14 @@ ${topicSection}
 
 /**
  * 获取所有作品列表
- * 从 publish_config.json 的 works 字段读取
+ * 从 config.json 的 works 字段读取
  */
 function listWorks() {
-  if (!fs.existsSync(PUBLISH_CONFIG_PATH)) {
-    console.error('未找到 publish_config.json，请先创建配置文件');
-    return [];
-  }
   try {
-    const config = JSON.parse(fs.readFileSync(PUBLISH_CONFIG_PATH, 'utf-8'));
+    const config = loadConfig();
     return Object.keys(config.works || {});
   } catch (e) {
-    console.error(`publish_config.json 解析失败: ${e.message}`);
+    console.error(`config.json 加载失败: ${e.message}`);
     return [];
   }
 }
