@@ -68,7 +68,6 @@ function createArticle(title, content, meta = {}) {
 }
 
 function importArticle(srcPath) {
-  const dir = getArticlesDir();
   const raw = fs.readFileSync(srcPath, 'utf-8');
   let meta, body;
 
@@ -91,4 +90,4 @@ function importArticle(srcPath) {
   return createArticle(meta.title, body, meta);
 }
 
-module.exports = { listArticles, parseArticle, updateMeta, createArticle, importArticle, getArticlesDir };
+module.exports = { listArticles, updateMeta, createArticle, importArticle };

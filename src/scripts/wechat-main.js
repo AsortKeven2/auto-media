@@ -577,8 +577,6 @@ program
       console.log(`  生成了 ${topics.length} 个选题`);
       topics.forEach((t, i) => console.log(`    ${i + 1}. [${t.category}] ${t.topic}`));
 
-      const allowedGroups = workConfig.image_dirs || [workName];
-
       for (let i = 0; i < topics.length; i++) {
         globalIdx++;
         const t = topics[i];
@@ -685,7 +683,6 @@ program
         const workEntry = worksToGenerate.find(w => w.name === workName);
         if (!workEntry) continue;
         const workConfig = workEntry.config;
-        const allowedGroups = workConfig.image_dirs || [workName];
 
         console.log(`\n  ▷ 补偿 [${workName}] ${failedItem.title || '(选题失败)'}`);
 

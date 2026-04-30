@@ -2,7 +2,7 @@
   "name": "auto-media",
   "version": "1.0.0",
   "description": "百家号/头条号/公众号内容生产 + 自动发布工具",
-  "main": "src/main.js",
+  "main": "src/scripts/main.js",
   "bin": {
     "bjh": "src/scripts/main.js",
     "wx": "src/scripts/wechat-main.js"

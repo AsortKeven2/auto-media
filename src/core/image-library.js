@@ -51,18 +51,6 @@ function listImagesByGroup(imageDir) {
 }
 
 /**
- * 构建 fileName → filePath 映射
- */
-function buildImageMap(imageDir) {
-  const images = scanImages(imageDir);
-  const map = {};
-  for (const img of images) {
-    map[img.fileName] = img.filePath;
-  }
-  return map;
-}
-
-/**
  * 通用封面选择（所有平台共用）
  *
  * 优先级：
@@ -74,7 +62,7 @@ function buildImageMap(imageDir) {
  * @param {string}   [options.imageDir]          图片素材根目录
  * @param {string}   [options.workFilter]        限定匹配的作品子目录（如"三国演义"）
  * @param {string[]} [options.articleImagePaths]  文章正文中的配图路径列表
- * @returns {{ coverPath: string|null, fromLibrary: boolean, charName: string }}
+ * @returns {{ coverPath: string|null, fromLibrary: boolean }}
  */
 function selectCoverImage(options = {}) {
   const {
@@ -131,7 +119,7 @@ function selectCoverImage(options = {}) {
         const best = pickBestRatio(charMap[charName]);
         if (best) {
           console.log(`封面匹配标题角色「${charName}」，候选 ${charMap[charName].length} 张`);
-          return { coverPath: best, fromLibrary: true, charName };
+          return { coverPath: best, fromLibrary: true };
         }
       }
     }
@@ -141,11 +129,11 @@ function selectCoverImage(options = {}) {
   if (articleImagePaths.length > 0) {
     const best = pickBestRatio(articleImagePaths);
     if (best) {
-      return { coverPath: best, fromLibrary: false, charName: '' };
+      return { coverPath: best, fromLibrary: false };
     }
   }
 
-  return { coverPath: null, fromLibrary: false, charName: '' };
+  return { coverPath: null, fromLibrary: false };
 }
 
-module.exports = { scanImages, listImagesByGroup, buildImageMap, selectCoverImage };
+module.exports = { listImagesByGroup, selectCoverImage };

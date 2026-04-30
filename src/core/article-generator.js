@@ -498,10 +498,5 @@ ${markdown}`;
 module.exports = {
   generateArticle,
   insertImages,
-  buildImageList,
-  resolveImageNames,
-  stripLastSectionImages,
   detectWorksFromTitle,
-  normalizeRankingHeadings,
-  validateRankingArticle,
 };

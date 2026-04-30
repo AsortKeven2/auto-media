@@ -97,30 +97,30 @@ images/
 
 ```bash
 # 检查所有平台登录状态
-node src/main.js check
+node src/scripts/main.js check
 
 # 设置 Cookie
-node src/main.js login "你的Cookie"
-node src/main.js login "你的Cookie" -p toutiao
-node src/main.js login "你的Cookie" -p wechat
+node src/scripts/main.js login "你的Cookie"
+node src/scripts/main.js login "你的Cookie" -p toutiao
+node src/scripts/main.js login "你的Cookie" -p wechat
 
 # 生成选题
-node src/main.js topics -c 10
-node src/main.js topics -w 西游记
+node src/scripts/main.js topics -c 10
+node src/scripts/main.js topics -w 西游记
 
 # 列出所有作品
-node src/main.js works
+node src/scripts/main.js works
 
 # 生成文章大纲
-node src/main.js outline "孙悟空大闹天宫，真的是故意留手吗？"
+node src/scripts/main.js outline "孙悟空大闹天宫，真的是故意留手吗？"
 
 # 推送单篇文章
-node src/main.js push articles/xxx.md
-node src/main.js push articles/xxx.md -p wechat    # 推送到公众号
+node src/scripts/main.js push articles/xxx.md
+node src/scripts/main.js push articles/xxx.md -p wechat    # 推送到公众号
 
 # 热文排行（百家号）
-node src/main.js top                   # 查看阅读量/点击率排行
-node src/main.js top -n 20             # 显示前20
+node src/scripts/main.js top                   # 查看阅读量/点击率排行
+node src/scripts/main.js top -n 20             # 显示前20
 
 # 批量生成 + 发布
 node src/scripts/main.js batch                # 按 config.json 配置执行
@@ -136,55 +136,39 @@ node src/scripts/main.js batch --interval 60  # 自定义间隔秒数（覆盖�
 node src/scripts/main.js batch --platform baijiahao --daily-record --publish
 
 # 推送所有 ready 状态文章
-node src/main.js push-ready --publish
-node src/main.js push-ready -p wechat     # 仅推送到公众号
+node src/scripts/main.js push-ready --publish
+node src/scripts/main.js push-ready -p wechat     # 仅推送到公众号
 ```
 
 ### 微信公众号 AI 生成
 
 ```bash
 # AI 直接生成文章 → 推送到草稿箱
-node src/wechat-main.js generate               # 按配置生成所有作品
-node src/wechat-main.js generate 西游记         # 仅生成指定作品
-node src/wechat-main.js generate --no-push     # 仅生成不推送
-node src/wechat-main.js generate --rounds 3    # 执行3轮（批量生成多天文章）
+node src/scripts/wechat-main.js generate               # 按配置生成所有作品
+node src/scripts/wechat-main.js generate 西游记         # 仅生成指定作品
+node src/scripts/wechat-main.js generate --no-push     # 仅生成不推送
+node src/scripts/wechat-main.js generate --rounds 3    # 执行3轮（批量生成多天文章）
 
 # 热文排行（公众号）
-node src/wechat-main.js top                    # 查看阅读量排行
-node src/wechat-main.js top -n 20              # 显示前20
+node src/scripts/wechat-main.js top                    # 查看阅读量排行
+node src/scripts/wechat-main.js top -n 20              # 显示前20
 ```
 
 ### 微信公众号 Notion 同步
 
 ```bash
 # 从 Notion 同步到公众号草稿箱
-node src/wechat-main.js batch             # 同步所有作品
-node src/wechat-main.js batch 西游记       # 同步指定作品
+node src/scripts/wechat-main.js batch             # 同步所有作品
+node src/scripts/wechat-main.js batch 西游记       # 同步指定作品
 
 # 列出草稿
-node src/wechat-main.js list
+node src/scripts/wechat-main.js list
 
 # 清空草稿
-node src/wechat-main.js clean
+node src/scripts/wechat-main.js clean
 ```
 
 执行 `wx batch` 时，会先把 Notion 页面同步到本地 Markdown（同步时就完成配图），再继续推送到公众号草稿箱。
-
-### 百家号本地 Markdown 发布
-
-```bash
-# 手动从 Notion 同步到本地 Markdown（同步时就配图）
-node src/bjh-notion-main.js sync
-node src/bjh-notion-main.js sync 西游记
-
-# 从本地 Markdown 发布到百家号（按 baijiahao.works.<作品>.count 控制数量）
-node src/bjh-notion-main.js publish
-node src/bjh-notion-main.js publish 西游记
-
-# 查看本地同步/发布状态
-node src/bjh-notion-main.js status
-node src/bjh-notion-main.js status 西游记
-```
 
 ### npm scripts 快捷方式
 
@@ -195,9 +179,6 @@ npm run batch:dry      # 批量生成但不推送
 npm run batch:bjh      # 仅发百家号
 npm run batch:bjh:slot # 百家号分时发布，轮次读config
 npm run batch:tt       # 仅发头条
-npm run bjh:sync       # 手动同步 Notion 到本地 Markdown
-npm run bjh:publish    # 从本地 Markdown 发布到百家号
-npm run bjh:status     # 查看百家号本地 Markdown 状态
 npm run wx:batch       # 微信公众号批量同步
 npm run wx:list        # 列出公众号草稿
 npm run help           # 显示所有命令

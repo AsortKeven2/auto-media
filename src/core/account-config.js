@@ -68,7 +68,6 @@ function getAccountCookie(account) {
 }
 
 module.exports = {
-  normalizePlatformAccounts,
   loadPlatformAccounts,
   filterAccounts,
   getAccountCookie,

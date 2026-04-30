@@ -7,11 +7,9 @@
 const fs = require('fs');
 const path = require('path');
 const { marked } = require('marked');
-const { imageSize } = require('image-size');
 const { BaijiahaoAPI } = require('./baijiahao-api');
 const { ToutiaoAPI } = require('./toutiao-api');
 const { WechatAPI } = require('./wechat-api');
-const { listArticles, updateMeta } = require('./content-manager');
 const { selectCoverImage } = require('./image-library');
 const { resolveProjectFile } = require('./local-file-utils');
 const config = require('./config');
@@ -213,7 +211,7 @@ async function pushWithImages(articlePath, imageDir, options = {}) {
     }
   } else {
     const work = meta.work || '';
-    const { coverPath, fromLibrary, charName } = selectCoverImage({
+    const { coverPath, fromLibrary } = selectCoverImage({
       title,
       imageDir,
       workFilter: work || undefined,

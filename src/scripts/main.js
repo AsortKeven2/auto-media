@@ -16,9 +16,9 @@ const { BaijiahaoAPI } = require('../core/baijiahao-api');
 const { ToutiaoAPI } = require('../core/toutiao-api');
 const { WechatAPI } = require('../core/wechat-api');
 const { fetchNotionPage } = require('../core/notion-fetcher');
-const { scanImages, selectCoverImage } = require('../core/image-library');
+const { selectCoverImage } = require('../core/image-library');
 const { loadPlatformAccounts, filterAccounts, getAccountCookie } = require('../core/account-config');
-const { loadConfig, saveConfig, toutiaoCookie } = require('../core/config');
+const { loadConfig, saveConfig } = require('../core/config');
 const {
   PUBLISH_RECORD_DIR,
   loadOrCreateDailyRecord,
@@ -540,7 +540,7 @@ program
         const urls = [];
         for (const p of platforms) {
           const apiEntries = platformAPIs[p] || [];
-          for (const { api: pApi, account: pAccount } of apiEntries) {
+          for (const { account: pAccount } of apiEntries) {
             const pName = platformLabel(p);
             const prefix = pAccount && pAccount.name !== 'default' ? `[${pAccount.name}] ` : '';
             console.log(`  >>> 推送到${prefix}${pName}...`);

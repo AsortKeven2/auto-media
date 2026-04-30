@@ -184,4 +184,4 @@ function buildCategoryPromptSection() {
   }).join('\n');
 }
 
-module.exports = { CATEGORIES, STYLE_GUIDE, getCategory, buildCategoryPromptSection };
+module.exports = { CATEGORIES, getCategory, buildCategoryPromptSection };

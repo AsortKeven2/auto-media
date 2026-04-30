@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const { fetchNotionPage, fetchNotionDirectory } = require('./notion-fetcher');
+const { fetchNotionPage } = require('./notion-fetcher');
 const { insertImages } = require('./article-generator');
 const { DEFAULT_IMAGE_DIR } = require('./batch-publish');
 const { normalizeMarkdownLocalImagePaths } = require('./local-file-utils');
@@ -129,26 +129,6 @@ function saveBjhSyncState(state) {
   fs.writeFileSync(file, JSON.stringify(state, null, 2), 'utf-8');
 }
 
-function getBjhSyncStateFile() {
-  return resolveBjhSyncStateFile().file;
-}
-
-/**
- * 按账号过滤 state 记录
- * accountName 为 "default" 或空时匹配无 account 字段的旧记录
- */
-function filterStateByAccount(state, accountName) {
-  if (!accountName) return state;
-  const filtered = {};
-  for (const [key, entry] of Object.entries(state)) {
-    const entryAccount = entry.account || 'default';
-    if (entryAccount === accountName) {
-      filtered[key] = entry;
-    }
-  }
-  return filtered;
-}
-
 function buildNotionPageUrl(pageId) {
   return `https://www.notion.so/${String(pageId).replace(/-/g, '')}`;
 }
@@ -260,104 +240,8 @@ async function ensureLocalMarkdownSynced({
   };
 }
 
-async function syncNotionWorkToLocal(workName, workConfig, opts = {}, accountName) {
-  const imageDir = path.resolve(opts.images || DEFAULT_IMAGE_DIR);
-  const allowedGroups = workConfig.image_dirs || [workName];
-  const intervalMs = parseInt(opts.interval || '15', 10) * 1000;
-
-  console.log(`\n${'='.repeat(50)}`);
-  console.log(`  同步本地 Markdown: ${workName}`);
-  console.log('='.repeat(50));
-
-  let childPages;
-  try {
-    childPages = await fetchNotionDirectory(workConfig.notionUrl);
-  } catch (e) {
-    console.error(`获取目录页失败: ${e.message}`);
-    return { success: 0, fail: 1, skipped: 0, total: 0 };
-  }
-
-  if (!childPages.length) {
-    console.log('目录页中没有子页面');
-    return { success: 0, fail: 0, skipped: 0, total: 0 };
-  }
-
-  const state = loadBjhSyncState();
-  const skipped = [];
-  const pending = [];
-
-  for (const child of childPages) {
-    const existing = state[child.id];
-    if (existing?.local_file && fs.existsSync(existing.local_file)) {
-      skipped.push(child);
-    } else {
-      pending.push(child);
-    }
-  }
-
-  if (skipped.length) {
-    console.log(`\n已同步到本地 ${skipped.length} 篇（跳过）`);
-  }
-
-  if (!pending.length) {
-    console.log('\n没有新的 Notion 页面需要同步到本地');
-    return { success: 0, fail: 0, skipped: skipped.length, total: childPages.length };
-  }
-
-  let success = 0;
-  let fail = 0;
-
-  for (let i = 0; i < pending.length; i++) {
-    const child = pending[i];
-    if (i > 0) {
-      console.log(`等待 ${opts.interval || '15'} 秒...`);
-      await new Promise(resolve => setTimeout(resolve, intervalMs));
-    }
-
-    console.log(`\n${'─'.repeat(50)}`);
-    console.log(`  [${i + 1}/${pending.length}] ${child.title}`);
-    console.log('─'.repeat(50));
-
-    try {
-      const result = await ensureLocalMarkdownSynced({
-        pageId: child.id,
-        pageTitle: child.title,
-        workName,
-        allowedGroups,
-        imageDir,
-        autoImages: opts.autoImages !== false,
-        state,
-        accountName,
-      });
-
-      state[child.id] = result.stateEntry;
-      saveBjhSyncState(state);
-      success++;
-
-      console.log(`  ✓ 已同步到本地: ${path.relative(path.join(__dirname, '../..'), result.localFile)}`);
-      if (result.imageStats.missing.length) {
-        console.log(`  缺失: ${result.imageStats.missing.join('、')}`);
-      }
-    } catch (e) {
-      fail++;
-      console.error(`  ✗ 同步失败: ${e.message}`);
-    }
-  }
-
-  return { success, fail, skipped: skipped.length, total: childPages.length };
-}
-
 module.exports = {
-  BJH_SYNC_STATE_FILE,
-  LOCAL_SYNC_ROOT_DIR,
   loadBjhSyncState,
   saveBjhSyncState,
-  getBjhSyncStateFile,
-  filterStateByAccount,
-  buildNotionPageUrl,
-  buildLocalMarkdownPath,
-  readLocalMarkdown,
-  resolveStoredLocalFile,
   ensureLocalMarkdownSynced,
-  syncNotionWorkToLocal,
 };

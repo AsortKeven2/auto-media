@@ -139,12 +139,6 @@ function decrementDailyRecord(recordPath, record, work) {
 
 module.exports = {
   PUBLISH_RECORD_DIR,
-  getLocalDateKey,
-  normalizeWorksCount,
-  sumWorks,
-  getDailyRecordPath,
-  deleteOldDailyRecords,
-  writeDailyRecord,
   loadOrCreateDailyRecord,
   getDailyBatchPlan,
   buildDailyBatchEntries,
