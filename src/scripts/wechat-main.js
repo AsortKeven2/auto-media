@@ -595,7 +595,7 @@ program
             imageDir,
             t.category,
             t.related_works,
-            { wordCount: '2500-3500', maxTokens: 10000, topArticlesHint }
+            { wordCount: '1500-2000', maxTokens: 4000, topArticlesHint }
           );
           const wordCount = content.replace(/\s/g, '').replace(/[#*\-\[\]()]/g, '').length;
           console.log(`  生成完成: ${wordCount} 字`);
@@ -704,7 +704,7 @@ program
           const { article: content, imageStats } = await generateArticle(
             topic.topic, null, topic.work, topic.characters,
             imageDir, topic.category, topic.related_works,
-            { wordCount: '2500-3500', maxTokens: 10000, topArticlesHint }
+            { wordCount: '1500-2000', maxTokens: 4000, topArticlesHint }
           );
           const wordCount = content.replace(/\s/g, '').replace(/[#*\-\[\]()]/g, '').length;
           console.log(`  生成完成: ${wordCount} 字`);

@@ -17,6 +17,7 @@ const { ToutiaoAPI } = require('../core/toutiao-api');
 const { WechatAPI } = require('../core/wechat-api');
 const { fetchNotionPage } = require('../core/notion-fetcher');
 const { selectCoverImage } = require('../core/image-library');
+const { CATEGORIES } = require('../core/categories');
 const { loadPlatformAccounts, filterAccounts, getAccountCookie } = require('../core/account-config');
 const { loadConfig, saveConfig } = require('../core/config');
 const {
@@ -223,7 +224,7 @@ program
   .description('生成文章大纲')
   .argument('<topic>', '选题标题')
   .option('-t, --type <type>', '指定类型')
-  .option('--category <cat>', '指定类别（疑问解读类/细节深挖类/反差揭秘类/数字盘点类/假设对比类）')
+  .option('--category <cat>', `指定类别（${Object.keys(CATEGORIES).join('/')}）`)
   .action(async (topic, opts) => {
     const outline = await generateOutline(topic, opts.type || null, opts.category || null);
     console.log(formatOutline(outline));
