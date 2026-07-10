@@ -613,6 +613,7 @@ program
     }
 
     const rounds = parseInt(opts.rounds) || 1;
+    const globalCategoryQueue = buildWeightedCategoryPlan(totalArticles * rounds);
 
     console.log('='.repeat(60));
     console.log(`  ${prefix}微信公众号 - AI 直接生成`);
@@ -629,6 +630,7 @@ program
     console.log(`  间隔: ${opts.interval} 秒`);
     console.log(`  推送: ${opts.push !== false ? '保存到草稿箱' : '仅生成不推送'}`);
     console.log('  热文参考: 已关闭');
+    console.log(`  全批分类配额: ${summarizeCategoryPlan(globalCategoryQueue)}`);
     console.log('='.repeat(60));
 
     // 检查登录
@@ -666,8 +668,8 @@ program
     const allResults = [];
     const draftArticles = []; // 收集所有文章，最后合并为一个草稿
 
-    // ── 全局分类配额：先按总量和权重算，再随机分配到各作品 ──
-    const globalCategoryPlan = buildWeightedCategoryPlan(totalArticles);
+    // ── 分类配额：启动时已按全批总量生成，这里每轮只消费本轮需要的类别 ──
+    const roundCategoryPlan = globalCategoryQueue.splice(0, totalArticles);
     const workSlots = [];
     for (const { name, count } of worksToGenerate) {
       for (let i = 0; i < count; i++) workSlots.push(name);
@@ -677,14 +679,17 @@ program
     const retryCategoriesByWork = {};
     for (let i = 0; i < totalArticles; i++) {
       const workName = shuffledWorkSlots[i];
-      const category = globalCategoryPlan[i];
+      const category = roundCategoryPlan[i];
       if (!categoriesByWork[workName]) categoriesByWork[workName] = [];
       categoriesByWork[workName].push(category);
     }
     for (const { name } of worksToGenerate) {
       retryCategoriesByWork[name] = [...(categoriesByWork[name] || [])];
     }
-    console.log(`\n  全局分类配额：${summarizeCategoryPlan(globalCategoryPlan)}`);
+    console.log(`\n  本轮分类配额：${summarizeCategoryPlan(roundCategoryPlan)}`);
+    if (rounds > 1) {
+      console.log(`  剩余分类配额：${summarizeCategoryPlan(globalCategoryQueue) || '无'}`);
+    }
 
     for (const { name: workName, config: workConfig, count } of worksToGenerate) {
       console.log(`\n${'#'.repeat(60)}`);
