@@ -12,6 +12,80 @@ const DATA_DIR = path.join(__dirname, '../..', 'data');
 const ARTICLES_DIR = path.join(__dirname, '../..', 'archive', 'baijiahao');
 const { loadConfig } = require('./config');
 
+const WECHAT_CATEGORY_WEIGHTS = [
+  { name: '数字盘点类', weight: 3 },
+  { name: '假设对比类', weight: 1 },
+  { name: '跨书人物对战类', weight: 1 },
+  { name: '势力对战类', weight: 1 },
+  { name: '名场面复盘类', weight: 1 },
+  { name: '权谋布局类', weight: 1 },
+  { name: '疑问解读类', weight: 1 },
+];
+const WECHAT_NORMAL_CATEGORIES = WECHAT_CATEGORY_WEIGHTS.map(item => item.name);
+const WECHAT_WEIGHTED_CATEGORY_POOL = WECHAT_CATEGORY_WEIGHTS.flatMap(item =>
+  Array.from({ length: item.weight }, () => item.name)
+);
+
+function shuffleArray(items) {
+  const arr = [...items];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+function buildWeightedCategoryPlan(totalCount) {
+  const count = Math.max(0, Math.floor(Number(totalCount) || 0));
+  if (!count) return [];
+
+  const totalWeight = WECHAT_CATEGORY_WEIGHTS.reduce((sum, item) => sum + item.weight, 0);
+  const weighted = WECHAT_CATEGORY_WEIGHTS.map(item => {
+    const exact = (count * item.weight) / totalWeight;
+    const base = Math.floor(exact);
+    return {
+      name: item.name,
+      weight: item.weight,
+      count: base,
+      remainder: exact - base,
+    };
+  });
+
+  let remaining = count - weighted.reduce((sum, item) => sum + item.count, 0);
+  const ranked = [...weighted].sort((a, b) => {
+    if (b.remainder !== a.remainder) return b.remainder - a.remainder;
+    if (b.weight !== a.weight) return b.weight - a.weight;
+    return a.name.localeCompare(b.name, 'zh-Hans-CN');
+  });
+
+  for (let i = 0; i < remaining; i++) {
+    ranked[i % ranked.length].count++;
+  }
+
+  const plan = [];
+  for (const item of weighted) {
+    for (let i = 0; i < item.count; i++) {
+      plan.push(item.name);
+    }
+  }
+  return shuffleArray(plan);
+}
+
+function getNormalCategories(platform) {
+  return platform === 'wechat'
+    ? WECHAT_WEIGHTED_CATEGORY_POOL
+    : Object.keys(CATEGORIES).filter(c => c !== '热文风格');
+}
+
+function buildCategoryPromptSectionForPlatform(platform) {
+  if (platform !== 'wechat') return buildCategoryPromptSection();
+
+  return WECHAT_NORMAL_CATEGORIES.map(name => {
+    const cat = CATEGORIES[name];
+    return `【${name}】${cat.subtitle}\n选题风格：${cat.topicStyle}`;
+  }).join('\n\n');
+}
+
 /**
  * 加载按作品分组的历史选题
  * 自动迁移旧格式 (flat array) → 新格式 (per-novel object)
@@ -102,7 +176,7 @@ function saveHistory(allHistory) {
 /**
  * 调用 AI 生成选题（按作品独立历史 + 分类别生成）
  */
-async function generateTopics(count = 10, workFilter = null, platform = 'baijiahao', topArticlesHint = null, explicitHotCount = null) {
+async function generateTopics(count = 10, workFilter = null, platform = 'baijiahao', topArticlesHint = null, explicitHotCount = null, categoryOverrides = null) {
   const works = listWorks();
   const allHistory = loadPerNovelHistory();
 
@@ -125,7 +199,7 @@ async function generateTopics(count = 10, workFilter = null, platform = 'baijiah
     : '';
 
   const platformLabel = platform === 'wechat' ? '微信公众号' : '百家号/头条号';
-  const categoryText = buildCategoryPromptSection();
+  const categoryText = buildCategoryPromptSectionForPlatform(platform);
 
   // ── 热文/正常分配由调用方通过 explicitHotCount 决定 ──
   const hotCount = (platform === 'wechat' && topArticlesHint && explicitHotCount !== null)
@@ -136,17 +210,21 @@ async function generateTopics(count = 10, workFilter = null, platform = 'baijiah
     console.log(`  混合模式：${hotCount} 条热文风格 + ${normalCount} 条正常分类`);
   }
 
-  // 本地随机分配类别，热文风格只服务于公众号热文参考，不参与常规随机选题。
-  const categoryNames = Object.keys(CATEGORIES).filter(c => c !== '热文风格');
-  const assignedCategories = [];
-  let shuffled = [...categoryNames].sort(() => Math.random() - 0.5);
-  let shuffleIdx = 0;
-  for (let i = 0; i < normalCount; i++) {
-    if (shuffleIdx >= shuffled.length) {
-      shuffled = [...categoryNames].sort(() => Math.random() - 0.5);
-      shuffleIdx = 0;
+  // 本地随机分配类别。公众号支持外部传入全局分类配额，避免每本小说各自洗牌；
+  // 热文风格只服务于公众号热文参考，不参与常规随机选题。
+  let assignedCategories = [];
+  const normalizedOverrides = Array.isArray(categoryOverrides)
+    ? categoryOverrides.filter(name => Boolean(CATEGORIES[name]))
+    : null;
+  if (normalizedOverrides && normalizedOverrides.length >= normalCount) {
+    assignedCategories = normalizedOverrides.slice(0, normalCount);
+  } else {
+    const categoryNames = getNormalCategories(platform);
+    let shuffled = shuffleArray(categoryNames);
+    for (let i = 0; i < normalCount; i++) {
+      if (!shuffled.length) shuffled = shuffleArray(categoryNames);
+      assignedCategories.push(shuffled.shift());
     }
-    assignedCategories.push(shuffled[shuffleIdx++]);
   }
 
   if (!allHistory[work]) allHistory[work] = [];
@@ -267,55 +345,68 @@ ${topArticlesHint}
 - 盘点角度要具体有趣（如武力、兵器、智谋、搞笑、心机、酒量、逃跑能力等），禁止用"悲情""隐藏""被忽略"等笼统虚词
 - 数字用汉字（"十大""五个""八位"），禁止阿拉伯数字和英文
 
-类型7 - 假设对比：
-- 两个角色假设对决、两方势力假设开战、不同阵营假设交锋等，分析结果会怎样
-- 可以是角色vs角色、势力vs势力、门派vs门派，也可以是角色vs势力
-- 可以是同一作品内，也可以跨作品
-- 标题必须点名对比双方
-- 句式要多变：不要都写"谁的胜算更大"，可以用"能撑几回合""鹿死谁手""谁先倒下""结局会怎样""能扛多久"等不同表达
+类型7 - 同书人物对战：
+- 只写同一作品内两个角色假设对决，适合"假设对比类"
+- 标题必须点名双方角色，不能写势力，也不能跨作品
+- 句式要多变：不要都写"谁的胜算更大"，可以用"能撑几回合""鹿死谁手""谁先倒下""能扛多久"等不同表达
+- 示例句式："孙悟空对战牛魔王，能撑百回合吗""林冲对战武松，谁先露破绽"
 
-类型8 - 细节深挖：
+类型8 - 跨书人物对战：
+- 写A小说中的人物对战B小说中的人物，适合"跨书人物对战类"
+- 标题必须点名两个角色，且两人必须来自不同作品
+- 标题可以带"能撑几回合""谁先露败象""谁会先变招""鹿死谁手"等强讨论表达
+- related_works 必须列出双方所属作品，如["神雕侠侣","笑傲江湖"]
+- 示例句式："杨过对战东方不败，谁先露败象""萧峰遇上郭靖，能打满百招吗"
+
+类型9 - 势力对战：
+- 写门派、山寨、朝廷、妖族、团队、阵营之间开战，适合"势力对战类"
+- 标题必须点名两个势力，不能只写两个头面人物单挑
+- 标题要有战役推演感，可以写"能撑几天""谁先失守""谁会先崩盘""能扛多久"
+- related_works 必须列出双方势力所属作品，跨作品时列出所有作品
+- 示例句式："梁山对战五岳剑派，能撑几天""取经团队攻打梁山，宋江能扛多久"
+
+类型10 - 细节深挖：
 - 聚焦影视剧或原著中容易被忽略的细节、伏笔、暗线
 - 标题必须包含具体的情节点或场景（如某个动作、某句台词、某个物件）
 - 标题必须包含作品名或作品标志词，并提到具体角色
 - 要有"你可能没注意到"的发现感，让读者觉得值得点进去看
 
-类型9 - 人物命运转折：
+类型11 - 人物命运转折：
 - 写一个角色从早期状态到关键转折后的变化，适合"人物弧光类"
 - 标题必须点名角色，并抓一个转折场景或选择
 - 示例句式："XX真正变冷，是从那一晚开始""XX最清醒的一次选择，反倒毁了自己"
 
-类型10 - 关系拉扯/试探：
+类型12 - 关系拉扯/试探：
 - 写两个人或三个人之间的信任、亏欠、试探、控制和误解，适合"关系博弈类"
 - 标题必须点名关系双方，最好带一个具体动作、称呼或一句话
 - 示例句式："XX那句称呼，早把XX的心思暴露了""XX一直防着XX，真正原因不在武功"
 
-类型11 - 名场面复盘：
+类型13 - 名场面复盘：
 - 围绕一场经典战斗、宴席、审问、告别、聚义、围攻等场景重新拆解
 - 标题必须有具体场景名或事件名，不要泛泛写"那一战""那一次"
 - 示例句式："少室山一战，XX真正输在这一步""华容道最险的，不是XX放走XX"
 
-类型12 - 权谋布局/局势推演：
+类型14 - 权谋布局/局势推演：
 - 写阵营、权力、计谋、招安、夺位、结盟、背叛等局势
 - 标题要有"局"的感觉：谁布置、谁入局、哪一步反噬
 - 示例句式："XX这步棋，看似保命其实埋雷""XX招安前，梁山已经输在这三步"
 
-类型13 - 冷门翻案：
+类型15 - 冷门翻案：
 - 给冷门角色、被骂角色、被低估选择重新估值，适合"冷门翻案类"
 - 标题必须承认争议，但给出新角度，不能硬洗
 - 示例句式："别只骂XX，他当时已经没路可退""很多人小看XX，其实他最懂局势"
 
-类型14 - 物件线索：
+类型16 - 物件线索：
 - 从兵器、信物、佛珠、酒杯、衣角、鞋、扇子、通关文牒等具体物件切入
 - 标题必须包含物件名，不能只写抽象的"暗线""伏笔"
 - 示例句式："XX手里那串佛珠，藏着XX旧事""XX送出的那双鞋，才是最后的心软"
 
-类型15 - 阵营群像/组织兴衰：
+类型17 - 阵营群像/组织兴衰：
 - 写门派、家族、山寨、朝廷、妖族、帮派、师门等群体的秩序和崩塌
 - 标题必须包含阵营名或组织标志词，并点出一个关键人物
 - 示例句式："梁山真正散掉，不是从招安开始""XX能压住众人，靠的不是武功"
 
-类型16 - 情绪价值/读者共鸣：
+类型18 - 情绪价值/读者共鸣：
 - 从委屈、遗憾、心软、执念、清醒、体面等情绪切入，但必须落到具体角色和场景
 - 适合人物弧光、关系博弈、冷门翻案，标题不要鸡汤化
 - 示例句式："XX最让人难受的，不是输而是没人懂""XX那次沉默，比翻脸还狠"
@@ -385,4 +476,4 @@ function listWorks() {
   }
 }
 
-module.exports = { generateTopics, listWorks };
+module.exports = { generateTopics, listWorks, buildWeightedCategoryPlan };

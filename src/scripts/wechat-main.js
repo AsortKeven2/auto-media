@@ -14,7 +14,7 @@ const { fetchNotionDirectory } = require('../core/notion-fetcher');
 const { mdToHtml, extractImagePaths, excludeTailImagePaths, DEFAULT_IMAGE_DIR, DEFAULT_TAIL_IMAGE } = require('../core/batch-publish');
 const { generateArticle } = require('../core/article-generator');
 const { selectCoverImage } = require('../core/image-library');
-const { generateTopics } = require('../core/topic-generator');
+const { generateTopics, buildWeightedCategoryPlan } = require('../core/topic-generator');
 const { ensureLocalMarkdownSynced, loadBjhSyncState, saveBjhSyncState } = require('../core/notion-local-sync');
 const { loadPlatformAccounts, filterAccounts, getAccountCookie } = require('../core/account-config');
 const { loadConfig, saveConfig } = require('../core/config');
@@ -33,6 +33,81 @@ function loadPublishConfig() {
 function loadWechatConfig() {
   const config = loadConfig();
   return config.wechat || {};
+}
+
+function shuffleArray(items) {
+  const arr = [...items];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+function summarizeCategoryPlan(plan) {
+  const counts = new Map();
+  for (const category of plan) {
+    counts.set(category, (counts.get(category) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([name, count]) => `${name} ${count}篇`)
+    .join('、');
+}
+
+function buildWechatArticleOptions(category, topArticlesHint) {
+  return {
+    wordCount: '2500-3000',
+    maxTokens: 7000,
+    topArticlesHint,
+  };
+}
+
+async function tryGenerateTopicForWork({ workName, category, attempts, seenTitles }) {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const overrides = category ? [category] : null;
+    const batch = await generateTopics(1, workName, 'wechat', null, null, overrides);
+
+    for (const topic of batch) {
+      if (!topic || !topic.topic || seenTitles.has(topic.topic)) continue;
+      seenTitles.add(topic.topic);
+      return topic;
+    }
+  }
+
+  return null;
+}
+
+async function generateTopicsWithRetry({ count, workName, categoryPlan, attempts = 3, fallbackWorkNames = [] }) {
+  const collected = [];
+  const seenTitles = new Set();
+
+  for (let i = 0; i < count; i++) {
+    const category = categoryPlan && categoryPlan.length
+      ? categoryPlan[i % categoryPlan.length]
+      : null;
+    let topic = await tryGenerateTopicForWork({ workName, category, attempts, seenTitles });
+
+    if (!topic) {
+      const replacementWorks = shuffleArray(fallbackWorkNames.filter(name => name && name !== workName));
+      for (const replacementWork of replacementWorks) {
+        console.log(`  ${workName}: 连续 ${attempts} 次选题失败，改用《${replacementWork}》补位...`);
+        topic = await tryGenerateTopicForWork({
+          workName: replacementWork,
+          category,
+          attempts,
+          seenTitles,
+        });
+        if (topic) {
+          console.log(`  补位成功: 《${replacementWork}》— [${topic.category}] ${topic.topic}`);
+          break;
+        }
+      }
+    }
+
+    if (topic) collected.push(topic);
+  }
+
+  return collected;
 }
 
 
@@ -60,7 +135,8 @@ function normalizeHotArticleTitles(value) {
 function getConfiguredWechatHotArticleTitles(config, accountConfig) {
   // 优先使用账号级别的配置
   if (accountConfig && accountConfig.hot_articles_reference) {
-    return normalizeHotArticleTitles(accountConfig.hot_articles_reference);
+    const accountTitles = normalizeHotArticleTitles(accountConfig.hot_articles_reference);
+    if (accountTitles) return accountTitles;
   }
   if (!config || typeof config !== 'object') return null;
   const wechat = config.wechat || {};
@@ -99,7 +175,7 @@ async function resolveWechatHotArticlesHint(api, publishConfig, accountConfig) {
 
   try {
     console.log('\n  读取公众号热文标题...');
-    const wxApi = api || new WechatAPI();
+    const wxApi = api || new WechatAPI(getAccountCookie(accountConfig));
     if (!api) await wxApi.fetchToken();
     const { byRead } = await wxApi.fetchTopArticles(10);
 
@@ -525,8 +601,6 @@ program
       ? randomPickCount * perWork
       : fixedWorks.reduce((sum, w) => sum + w.count, 0);
 
-    // 读取合并配置（账号级别）
-    const publishConfig = loadPublishConfig() || {};
     const wechatCombine = account.combine === true;
     const accountAuthor = account.author || '';
     const accountWriterId = account.writer_id || '';
@@ -554,6 +628,7 @@ program
     console.log(`  合并: ${wechatCombine ? '多图文合并' : '逐篇独立草稿'}`);
     console.log(`  间隔: ${opts.interval} 秒`);
     console.log(`  推送: ${opts.push !== false ? '保存到草稿箱' : '仅生成不推送'}`);
+    console.log('  热文参考: 已关闭');
     console.log('='.repeat(60));
 
     // 检查登录
@@ -568,7 +643,7 @@ program
       }
     }
 
-    const topArticlesHint = await resolveWechatHotArticlesHint(api, publishConfig, account);
+    const topArticlesHint = null;
 
     let grandTotalSuccess = 0;
     let grandTotalFail = 0;
@@ -580,6 +655,7 @@ program
 
     // 本轮要生成的作品：随机模式每轮重新抽取，否则使用固定列表
     const worksToGenerate = isRandom ? selectRandomWorks() : fixedWorks;
+    const availableWorkNames = Object.keys(allConfigs).filter(name => allConfigs[name]);
     if (isRandom) {
       console.log(`  本轮随机合集: ${worksToGenerate.map(w => w.name).join('、')}`);
     }
@@ -590,35 +666,40 @@ program
     const allResults = [];
     const draftArticles = []; // 收集所有文章，最后合并为一个草稿
 
-    // ── 批次层面决定热文分配：总量 50%（向上取整）随机分配到各作品 ──
-    const hotCountPerWork = {};
-    if (topArticlesHint) {
-      const totalHot = Math.ceil(totalArticles / 2);
-      // 展开所有文章槽位，标记作品归属，然后随机选 totalHot 个作为热文
-      const slots = [];
-      for (const { name, count } of worksToGenerate) {
-        for (let i = 0; i < count; i++) slots.push(name);
-      }
-      // 随机打乱后取前 totalHot 个
-      const shuffledSlots = [...slots].sort(() => Math.random() - 0.5);
-      const hotSlots = shuffledSlots.slice(0, totalHot);
-      for (const name of Object.keys(Object.fromEntries(worksToGenerate.map(w => [w.name, 0])))) {
-        hotCountPerWork[name] = 0;
-      }
-      for (const name of hotSlots) {
-        hotCountPerWork[name] = (hotCountPerWork[name] || 0) + 1;
-      }
-      console.log(`\n  热文分配（总计 ${totalHot}/${totalArticles}）：${worksToGenerate.map(w => `${w.name} ${hotCountPerWork[w.name] || 0}条热文`).join('、')}`);
+    // ── 全局分类配额：先按总量和权重算，再随机分配到各作品 ──
+    const globalCategoryPlan = buildWeightedCategoryPlan(totalArticles);
+    const workSlots = [];
+    for (const { name, count } of worksToGenerate) {
+      for (let i = 0; i < count; i++) workSlots.push(name);
     }
+    const shuffledWorkSlots = shuffleArray(workSlots);
+    const categoriesByWork = {};
+    const retryCategoriesByWork = {};
+    for (let i = 0; i < totalArticles; i++) {
+      const workName = shuffledWorkSlots[i];
+      const category = globalCategoryPlan[i];
+      if (!categoriesByWork[workName]) categoriesByWork[workName] = [];
+      categoriesByWork[workName].push(category);
+    }
+    for (const { name } of worksToGenerate) {
+      retryCategoriesByWork[name] = [...(categoriesByWork[name] || [])];
+    }
+    console.log(`\n  全局分类配额：${summarizeCategoryPlan(globalCategoryPlan)}`);
 
     for (const { name: workName, config: workConfig, count } of worksToGenerate) {
       console.log(`\n${'#'.repeat(60)}`);
       console.log(`  ${workName} — 计划 ${count} 篇`);
       console.log('#'.repeat(60));
 
-      // 生成选题，传入该作品分配到的热文数量
-      const workHotCount = hotCountPerWork[workName] || 0;
-      const topics = await generateTopics(count, workName, 'wechat', topArticlesHint, workHotCount);
+      // 生成选题，传入该作品的全局分类配额
+      const workCategoryPlan = categoriesByWork[workName] || [];
+      const topics = await generateTopicsWithRetry({
+        count,
+        workName,
+        categoryPlan: workCategoryPlan,
+        attempts: 3,
+        fallbackWorkNames: availableWorkNames,
+      });
       if (!topics.length) {
         console.error(`  ${workName}: 选题生成失败`);
         totalFail += count;
@@ -627,14 +708,27 @@ program
         }
         continue;
       }
+      if (topics.length < count) {
+        const missingCount = count - topics.length;
+        console.error(`  ${workName}: 仍缺少 ${missingCount} 个选题`);
+        totalFail += missingCount;
+        for (let k = 0; k < missingCount; k++) {
+          allResults.push({ work: workName, title: null, success: false, message: '选题生成失败' });
+        }
+      }
       console.log(`  生成了 ${topics.length} 个选题`);
       topics.forEach((t, i) => console.log(`    ${i + 1}. [${t.category}] ${t.topic}`));
 
       for (let i = 0; i < topics.length; i++) {
         globalIdx++;
         const t = topics[i];
+        const actualWorkName = t.work || workName;
+        const actualWorkConfig = allConfigs[actualWorkName] || workConfig;
+        const workLabel = actualWorkName === workName
+          ? workName
+          : `${workName} → ${actualWorkName}`;
         console.log(`\n${'─'.repeat(60)}`);
-        console.log(`  [${globalIdx}/${totalArticles}] ${workName} — ${t.topic}`);
+        console.log(`  [${globalIdx}/${totalArticles}] ${workLabel} — ${t.topic}`);
         console.log('─'.repeat(60));
 
         try {
@@ -643,12 +737,12 @@ program
           const { article: content, imageStats } = await generateArticle(
             t.topic,
             null,
-            t.work,
+            actualWorkName,
             t.characters,
             imageDir,
             t.category,
             t.related_works,
-            { wordCount: '1500-2000', maxTokens: 4000, topArticlesHint }
+            buildWechatArticleOptions(t.category, topArticlesHint)
           );
           const wordCount = content.replace(/\s/g, '').replace(/[#*\-\[\]()]/g, '').length;
           console.log(`  生成完成: ${wordCount} 字`);
@@ -665,7 +759,7 @@ program
           if (opts.push === false) {
             console.log('  跳过推送（--no-push）');
             totalSuccess++;
-            allResults.push({ work: workName, title: t.topic, success: true, skipped: true });
+            allResults.push({ work: actualWorkName, plannedWork: workName, title: t.topic, success: true, skipped: true });
             continue;
           }
 
@@ -685,7 +779,7 @@ program
           const coverResult = selectCoverImage({
             title: t.topic,
             imageDir,
-            workFilter: workName,
+            workFilter: actualWorkName,
             articleImagePaths: imagePaths,
           });
 
@@ -705,26 +799,26 @@ program
           html = html.replace(/<img[^>]+src="(?!https?:\/\/)[^"]*"[^>]*>/gi, () => '');
 
           // 6. 收集到待合并列表
-          const albumInfo = buildAlbumInfo(workConfig);
+          const albumInfo = buildAlbumInfo(actualWorkConfig);
           draftArticles.push({
             title: t.topic,
             content: html,
             coverUrl,
             options: { albumInfo, author: accountAuthor, writerId: accountWriterId },
-            work: workName,
+            work: actualWorkName,
           });
           totalSuccess++;
-          allResults.push({ work: workName, title: t.topic, success: true });
+          allResults.push({ work: actualWorkName, plannedWork: workName, title: t.topic, success: true });
 
         } catch (e) {
           totalFail++;
           console.error(`  ✗ 处理失败: ${e.message}`);
-          allResults.push({ work: workName, title: t.topic, success: false, message: e.message, _topicObj: t });
+          allResults.push({ work: actualWorkName, plannedWork: workName, title: t.topic, success: false, message: e.message, _topicObj: t });
         }
       }
     }
 
-    // ── 失败补偿：对本轮失败的文章重新生成一次 ──
+    // ── 失败补偿：对本轮失败的文章重新生成，必要时换小说补位 ──
     const failedItems = allResults.filter(r => !r.success);
     if (failedItems.length > 0) {
       console.log(`\n${'─'.repeat(60)}`);
@@ -733,9 +827,8 @@ program
 
       for (const failedItem of failedItems) {
         const workName = failedItem.work;
-        const workEntry = worksToGenerate.find(w => w.name === workName);
-        if (!workEntry) continue;
-        const workConfig = workEntry.config;
+        const workConfig = allConfigs[workName] || (worksToGenerate.find(w => w.name === workName) || {}).config;
+        if (!workConfig) continue;
 
         console.log(`\n  ▷ 补偿 [${workName}] ${failedItem.title || '(选题失败)'}`);
 
@@ -744,20 +837,33 @@ program
           let topic = failedItem._topicObj;
           if (!topic) {
             console.log('  重新生成选题...');
-            const retryTopics = await generateTopics(1, workName, 'wechat', topArticlesHint, 0);
+            const retryCategory = (retryCategoriesByWork[workName] && retryCategoriesByWork[workName].shift())
+              || (categoriesByWork[workName] && categoriesByWork[workName][0])
+              || '数字盘点类';
+            const retryTopics = await generateTopicsWithRetry({
+              count: 1,
+              workName,
+              categoryPlan: [retryCategory],
+              attempts: 3,
+              fallbackWorkNames: availableWorkNames,
+            });
             if (!retryTopics.length) {
               console.error(`  ✗ 补偿选题仍然失败: ${workName}`);
               continue;
             }
             topic = retryTopics[0];
-            console.log(`  新选题: [${topic.category}] ${topic.topic}`);
+            const actualRetryWork = topic.work || workName;
+            const retryLabel = actualRetryWork === workName ? workName : `${workName} → ${actualRetryWork}`;
+            console.log(`  新选题: [${retryLabel}] [${topic.category}] ${topic.topic}`);
           }
+          const actualTopicWork = topic.work || workName;
+          const actualTopicConfig = allConfigs[actualTopicWork] || workConfig;
 
           console.log('  AI 写作中...');
           const { article: content, imageStats } = await generateArticle(
-            topic.topic, null, topic.work, topic.characters,
+            topic.topic, null, actualTopicWork, topic.characters,
             imageDir, topic.category, topic.related_works,
-            { wordCount: '1500-2000', maxTokens: 4000, topArticlesHint }
+            buildWechatArticleOptions(topic.category, topArticlesHint)
           );
           const wordCount = content.replace(/\s/g, '').replace(/[#*\-\[\]()]/g, '').length;
           console.log(`  生成完成: ${wordCount} 字`);
@@ -775,7 +881,7 @@ program
             const imagePaths = excludeTailImagePaths(extractImagePaths(finalMarkdown), tailImage);
             let coverUrl = null;
             const coverResult = selectCoverImage({
-              title: topic.topic, imageDir, workFilter: workName, articleImagePaths: imagePaths,
+              title: topic.topic, imageDir, workFilter: actualTopicWork, articleImagePaths: imagePaths,
             });
             if (coverResult.coverPath) {
               const uploaded = await api.uploadImage(coverResult.coverPath);
@@ -784,15 +890,16 @@ program
             html = await api.processContentImages(html);
             html = html.replace(/<img[^>]+src="(?!https?:\/\/)[^"]*"[^>]*>/gi, () => '');
 
-            const albumInfo = buildAlbumInfo(workConfig);
+            const albumInfo = buildAlbumInfo(actualTopicConfig);
             draftArticles.push({
               title: topic.topic, content: html, coverUrl,
-              options: { albumInfo, author: accountAuthor, writerId: accountWriterId }, work: workName,
+              options: { albumInfo, author: accountAuthor, writerId: accountWriterId }, work: actualTopicWork,
             });
           }
 
           // 更新结果记录
           failedItem.success = true;
+          failedItem.work = actualTopicWork;
           failedItem.title = topic.topic;
           failedItem.message = undefined;
           totalSuccess++;
@@ -870,9 +977,10 @@ program
     console.log(`  ${rounds > 1 ? `第 ${round + 1} 轮` : ''}生成完成`);
     console.log('='.repeat(60));
     console.log(`  计划: ${totalArticles} 篇 | 成功: ${totalSuccess} 篇 | 失败: ${totalFail} 篇`);
-    if (worksToGenerate.length > 1) {
+    if (allResults.length > 1) {
       console.log('\n各作品统计:');
-      for (const { name: workName } of worksToGenerate) {
+      const statWorkNames = [...new Set(allResults.map(r => r.work).filter(Boolean))];
+      for (const workName of statWorkNames) {
         const workResults = allResults.filter(r => r.work === workName);
         const workSuccess = workResults.filter(r => r.success).length;
         console.log(`  ${workName}: ${workSuccess}/${workResults.length}`);
@@ -882,7 +990,10 @@ program
       console.log('\n详情:');
       allResults.forEach((r, i) => {
         const icon = r.skipped ? '○' : r.success ? '✓' : '✗';
-        console.log(`  ${icon} ${i + 1}. [${r.work}] ${r.title}`);
+        const workLabel = r.plannedWork && r.plannedWork !== r.work
+          ? `${r.plannedWork} → ${r.work}`
+          : r.work;
+        console.log(`  ${icon} ${i + 1}. [${workLabel}] ${r.title}`);
         if (r.draft_url) console.log(`      ${r.draft_url}`);
         if (!r.success && r.message) console.log(`      ${r.message}`);
       });
