@@ -10,7 +10,7 @@ const { listImagesByGroup } = require('./image-library');
 const { getCategory } = require('./categories');
 const { toPortableProjectPath, normalizeMarkdownLocalImagePaths } = require('./local-file-utils');
 
-const RANKING_CATEGORY = '数字盘点类';
+const RANKING_CATEGORIES = new Set(['数字盘点类', '武力排名类']);
 const RANKING_SELF_CORRECTION_REGEX = /不对[，。！？、… ]|重新来|重新整理|咱们重新|哦对了|等等[，。！？、… ]|推翻重来/;
 
 /**
@@ -390,7 +390,8 @@ async function generateArticle(topic, outline, work, characters, imageDir, categ
   const allowedGroups = relatedWorks && relatedWorks.length > 0 ? relatedWorks : (work ? [work] : []);
   const imageList = imageDir ? buildImageList(imageDir, work, allowedGroups) : '';
   const basePrompt = buildPrompt(topic, outline, work, imageList, category, opts);
-  const maxAttempts = category === RANKING_CATEGORY ? 3 : 1;
+  const isRankingCategory = RANKING_CATEGORIES.has(category);
+  const maxAttempts = isRankingCategory ? 3 : 1;
 
   let article = '';
   let lastValidationErrors = [];
@@ -406,7 +407,7 @@ async function generateArticle(topic, outline, work, characters, imageDir, categ
       throw new Error('文章生成失败，请检查 config.json 的 doubao_api_key');
     }
 
-    if (category !== RANKING_CATEGORY) break;
+    if (!isRankingCategory) break;
 
     const validation = validateRankingArticle(article);
     article = validation.article;
@@ -417,11 +418,11 @@ async function generateArticle(topic, outline, work, characters, imageDir, categ
 
     lastValidationErrors = validation.errors;
     if (attempt < maxAttempts) {
-      console.warn(`  ⚠ 数字盘点类结构校验失败，第${attempt}次重试：${validation.errors.join('；')}`);
+      console.warn(`  ⚠ ${category}结构校验失败，第${attempt}次重试：${validation.errors.join('；')}`);
       continue;
     }
 
-    throw new Error(`数字盘点类结构校验失败：${validation.errors.join('；')}`);
+    throw new Error(`${category}结构校验失败：${validation.errors.join('；')}`);
   }
 
   let imageStats = { matched: [], missing: [] };
