@@ -137,10 +137,45 @@ function decrementDailyRecord(recordPath, record, work) {
   return record.works[work];
 }
 
+function ensureDailyCategoryQuota(recordPath, record, buildCategoryPlan) {
+  if (!Array.isArray(record.category_queue)) {
+    const total = Number(record.total) || sumWorks(record.works);
+    const remainingTotal = sumWorks(record.works);
+    const consumed = Math.max(0, total - remainingTotal);
+    const fullQueue = buildCategoryPlan(total);
+    record.category_total = total;
+    record.category_queue = fullQueue.slice(consumed);
+    writeDailyRecord(recordPath, record);
+    return { created: true, total, remaining: record.category_queue.length };
+  }
+
+  record.category_queue = record.category_queue.filter(Boolean);
+  record.category_total = Number(record.category_total) || record.category_queue.length;
+  return { created: false, total: record.category_total, remaining: record.category_queue.length };
+}
+
+function peekDailyCategoryPlan(record, count) {
+  const limit = Math.max(0, Math.floor(Number(count) || 0));
+  return Array.isArray(record.category_queue)
+    ? record.category_queue.slice(0, limit)
+    : [];
+}
+
+function consumeDailyCategoryPlan(recordPath, record, count) {
+  const used = Math.max(0, Math.floor(Number(count) || 0));
+  if (!Array.isArray(record.category_queue)) record.category_queue = [];
+  record.category_queue.splice(0, used);
+  writeDailyRecord(recordPath, record);
+  return record.category_queue.length;
+}
+
 module.exports = {
   PUBLISH_RECORD_DIR,
   loadOrCreateDailyRecord,
   getDailyBatchPlan,
   buildDailyBatchEntries,
   decrementDailyRecord,
+  ensureDailyCategoryQuota,
+  peekDailyCategoryPlan,
+  consumeDailyCategoryPlan,
 };

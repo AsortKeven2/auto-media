@@ -7,7 +7,7 @@ const { Command } = require('commander');
 const path = require('path');
 const fs = require('fs');
 
-const { generateTopics, listWorks } = require('../core/topic-generator');
+const { generateTopics, listWorks, buildWeightedCategoryPlan } = require('../core/topic-generator');
 const { generateOutline, formatOutline } = require('../core/outline-generator');
 const { generateArticle, insertImages, detectWorksFromTitle } = require('../core/article-generator');
 const { listArticles, updateMeta, createArticle, importArticle } = require('../core/content-manager');
@@ -26,6 +26,9 @@ const {
   getDailyBatchPlan,
   buildDailyBatchEntries,
   decrementDailyRecord,
+  ensureDailyCategoryQuota,
+  peekDailyCategoryPlan,
+  consumeDailyCategoryPlan,
 } = require('../core/daily-publish-record');
 
 // ==================== 缺失图片日志 ====================
@@ -66,6 +69,16 @@ function logMissingImages(work, topic, missingNames) {
     '',
   ];
   fs.appendFileSync(logFile, lines.join('\n'), 'utf-8');
+}
+
+function summarizeCategoryPlan(plan) {
+  const counts = new Map();
+  for (const category of plan || []) {
+    counts.set(category, (counts.get(category) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([name, count]) => `${name} ${count}篇`)
+    .join('、');
 }
 
 const program = new Command();
@@ -375,12 +388,14 @@ program
       const { record, recordPath, created, deletedOldRecords } = loadOrCreateDailyRecord(publishConfig.works, {
         recordDir: opts.recordDir,
       });
+      const categoryQuota = ensureDailyCategoryQuota(recordPath, record, buildWeightedCategoryPlan);
       const plan = getDailyBatchPlan(record, rounds);
-      dailyRecordContext = { record, recordPath, rounds, plan };
+      dailyRecordContext = { record, recordPath, rounds, plan, categoryQuota };
 
       console.log(`  发布记录: ${recordPath}${created ? '（今日首次创建）' : ''}`);
       deletedOldRecords.forEach(file => console.log(`  已删除旧发布记录: ${file}`));
       console.log(`  今日剩余: ${record.remaining_total}/${record.total} 篇`);
+      console.log(`  今日分类配额: ${categoryQuota.created ? '已创建' : '已读取'}，剩余 ${categoryQuota.remaining}/${categoryQuota.total} 篇`);
       console.log(`  今日配置: ${plan.roundsTotal} 轮，基础每轮 ${plan.baseBatchSize} 篇，本轮计划 ${plan.batchSize} 篇${plan.isFinalRound ? '（发送全部剩余）' : ''}`);
     }
 
@@ -408,6 +423,11 @@ program
     console.log(`  素材目录: ${imageDir}`);
     if (dailyRecordContext) {
       console.log(`  分时发布: 每天 ${dailyRecordContext.rounds} 轮，基础每轮 ${dailyRecordContext.plan.baseBatchSize} 篇，优先选择剩余量最多的作品`);
+      console.log(`  本轮分类配额: ${summarizeCategoryPlan(peekDailyCategoryPlan(dailyRecordContext.record, totalArticles))}`);
+    }
+    const batchCategoryQueue = dailyRecordContext ? null : buildWeightedCategoryPlan(totalArticles);
+    if (!dailyRecordContext) {
+      console.log(`  全批分类配额: ${summarizeCategoryPlan(batchCategoryQueue)}`);
     }
     console.log('='.repeat(60));
 
@@ -456,16 +476,32 @@ program
       console.log(`  ${work} — 计划 ${count} 篇`);
       console.log('#'.repeat(60));
 
+      const categoryPlan = dailyRecordContext
+        ? peekDailyCategoryPlan(dailyRecordContext.record, count)
+        : batchCategoryQueue.slice(0, count);
+      if (categoryPlan.length) {
+        console.log(`  分类配额: ${summarizeCategoryPlan(categoryPlan)}`);
+      }
+
       // 为该作品生成选题（不足时重试一次补齐）
-      let topics = await generateTopics(count, work, 'baijiahao');
+      let topics = await generateTopics(count, work, 'baijiahao', null, null, categoryPlan);
       if (topics.length < count && topics.length > 0) {
         console.log(`  选题不足 ${topics.length}/${count}，补充生成中...`);
-        const extra = await generateTopics(count - topics.length, work, 'baijiahao');
+        const extraCategoryPlan = dailyRecordContext
+          ? peekDailyCategoryPlan(dailyRecordContext.record, count).slice(topics.length)
+          : categoryPlan.slice(topics.length);
+        const extra = await generateTopics(count - topics.length, work, 'baijiahao', null, null, extraCategoryPlan);
         topics = topics.concat(extra);
       }
       if (!topics.length) {
         console.error(`  ${work}: 选题生成失败`);
         continue;
+      }
+      if (dailyRecordContext) {
+        const remainingCategories = consumeDailyCategoryPlan(dailyRecordContext.recordPath, dailyRecordContext.record, topics.length);
+        console.log(`  分类配额已扣减: ${topics.length} 篇，今日分类剩余 ${remainingCategories} 篇`);
+      } else {
+        batchCategoryQueue.splice(0, topics.length);
       }
       console.log(`  生成了 ${topics.length} 个选题`);
       topics.forEach((t, i) => console.log(`    ${i + 1}. [${t.category}] ${t.topic}`));

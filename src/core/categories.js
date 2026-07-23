@@ -234,7 +234,7 @@ const CATEGORIES = {
     outlineHint: '6-10 个排名项，按战绩、对手质量、败绩含金量和稳定性逐项佐证',
     maxWords: '1500-2000',
     maxTokens: 6500,
-    wechatOnly: true,
+    featuredTitleOnly: true,
     articlePrompt: `${STYLE_GUIDE}
 
 【武力排名类专属要求】
@@ -254,7 +254,7 @@ const CATEGORIES = {
     outlineHint: '4-6 个章节，先定评判标准，再用战绩、对手、场景变量逐层判断',
     maxWords: '1500-2000',
     maxTokens: 6000,
-    wechatOnly: true,
+    featuredTitleOnly: true,
     articlePrompt: `${STYLE_GUIDE}
 
 【实力判定类专属要求】
@@ -273,7 +273,7 @@ const CATEGORIES = {
     outlineHint: '4-7 个章节，按关键人物或关键节点拆结局成因和命运代价',
     maxWords: '1500-2000',
     maxTokens: 6000,
-    wechatOnly: true,
+    featuredTitleOnly: true,
     articlePrompt: `${STYLE_GUIDE}
 
 【结局命运类专属要求】
@@ -292,7 +292,7 @@ const CATEGORIES = {
     outlineHint: '4-6 个章节，按流行说法、原著依据、影视改编、合理结论推进',
     maxWords: '1500-2000',
     maxTokens: 6000,
-    wechatOnly: true,
+    featuredTitleOnly: true,
     articlePrompt: `${STYLE_GUIDE}
 
 【原著考据类专属要求】
@@ -311,7 +311,7 @@ const CATEGORIES = {
     outlineHint: '5-7 个章节，先限定假设边界，再按连锁反应推演结果',
     maxWords: '1500-2000',
     maxTokens: 6500,
-    wechatOnly: true,
+    featuredTitleOnly: true,
     articlePrompt: `${STYLE_GUIDE}
 
 【剧情假设类专属要求】
@@ -330,7 +330,7 @@ const CATEGORIES = {
     outlineHint: '4-6 个章节，先列流行误区，再逐条用原著或剧情纠偏',
     maxWords: '1500-2000',
     maxTokens: 6000,
-    wechatOnly: true,
+    featuredTitleOnly: true,
     articlePrompt: `${STYLE_GUIDE}
 
 【设定纠偏类专属要求】
@@ -349,7 +349,7 @@ const CATEGORIES = {
     outlineHint: '4-6 个章节，围绕原著基础、续书改动、人物结局和价值立场对照',
     maxWords: '1500-2000',
     maxTokens: 6500,
-    wechatOnly: true,
+    featuredTitleOnly: true,
     articlePrompt: `${STYLE_GUIDE}
 
 【续书衍生类专属要求】
@@ -484,7 +484,7 @@ function getCategory(name) {
  * 构建选题 prompt 中的类别说明
  */
 function buildCategoryPromptSection() {
-  return Object.entries(CATEGORIES).filter(([name, cat]) => name !== '热文风格' && !cat.wechatOnly).map(([name, cat]) => {
+  return Object.entries(CATEGORIES).filter(([name, cat]) => name !== '热文风格' && !cat.featuredTitleOnly).map(([name, cat]) => {
     return `- ${name}（${cat.subtitle}）：${cat.topicStyle}`;
   }).join('\n');
 }
