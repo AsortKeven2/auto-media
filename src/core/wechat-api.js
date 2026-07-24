@@ -17,6 +17,7 @@ class WechatAPI {
 
 
     const cookie = cookieStr || '';
+    this.cookie = cookie;
 
     this.client = axios.create({
       headers: {
@@ -29,6 +30,45 @@ class WechatAPI {
       maxRedirects: 0,
       validateStatus: s => s < 400,
     });
+  }
+
+  _setCookieHeader(cookie) {
+    this.cookie = cookie || '';
+    this.client.defaults.headers.Cookie = this.cookie;
+    if (this.client.defaults.headers.common) {
+      this.client.defaults.headers.common.Cookie = this.cookie;
+    }
+  }
+
+  getCookieString() {
+    return this.cookie || '';
+  }
+
+  _updateCookiesFromResponse(resp) {
+    const setCookie = resp?.headers?.['set-cookie'];
+    if (!setCookie || !setCookie.length) return;
+
+    const cookieMap = new Map();
+    const currentParts = String(this.cookie || '')
+      .split(';')
+      .map(part => part.trim())
+      .filter(Boolean);
+    for (const part of currentParts) {
+      const eqIdx = part.indexOf('=');
+      if (eqIdx > 0) cookieMap.set(part.slice(0, eqIdx), part.slice(eqIdx + 1));
+    }
+
+    const nextParts = Array.isArray(setCookie) ? setCookie : [setCookie];
+    for (const item of nextParts) {
+      const pair = String(item).split(';')[0].trim();
+      const eqIdx = pair.indexOf('=');
+      if (eqIdx > 0) cookieMap.set(pair.slice(0, eqIdx), pair.slice(eqIdx + 1));
+    }
+
+    const nextCookie = [...cookieMap.entries()]
+      .map(([key, value]) => `${key}=${value}`)
+      .join('; ');
+    this._setCookieHeader(nextCookie);
   }
 
   // ==================== 认证 ====================
@@ -57,6 +97,14 @@ class WechatAPI {
         maxRedirects: 0,
         validateStatus: s => s >= 200 && s < 400,
       });
+      this._updateCookiesFromResponse(resp);
+
+      const location = resp.headers?.location || '';
+      const redirectMatch = location.match(/token=(\d+)/);
+      if (redirectMatch) {
+        this.token = redirectMatch[1];
+        return this.token;
+      }
 
       // 如果没有重定向直接返回了 200，从 HTML 提取
       if (typeof resp.data === 'string') {
@@ -73,6 +121,7 @@ class WechatAPI {
     } catch (e) {
       // 302 重定向 - 从 Location 头提取 token
       if (e.response?.status === 302 || e.response?.status === 301) {
+        this._updateCookiesFromResponse(e.response);
         const location = e.response.headers.location || '';
         const match = location.match(/token=(\d+)/);
         if (match) {
@@ -288,6 +337,145 @@ class WechatAPI {
     } catch {
       return [];
     }
+  }
+
+  /**
+   * 获取文章合集列表
+   * @param {number} type 0 为普通文章合集
+   * @returns {Promise<Array<{ id: string, title: string, type: number, total: number }>>}
+   */
+  async fetchAlbumList(type = 0) {
+    if (!this.token) await this.fetchToken();
+
+    const allItems = [];
+    let begin = 0;
+    const count = 200;
+
+    while (true) {
+      const { data } = await this.client.get(
+        'https://mp.weixin.qq.com/cgi-bin/appmsgalbummgr',
+        {
+          params: {
+            action: 'list',
+            begin,
+            count,
+            latest: 1,
+            type,
+            token: this.token,
+            lang: 'zh_CN',
+            f: 'json',
+            ajax: 1,
+          },
+          maxRedirects: 5,
+          validateStatus: s => s < 500,
+        }
+      );
+
+      if (data.base_resp?.ret !== 0) {
+        const msg = data.base_resp?.err_msg || '获取合集列表失败';
+        throw new Error(`${msg} (ret: ${data.base_resp?.ret || ''})`);
+      }
+
+      const items = data.list_resp?.items || [];
+      for (const item of items) {
+        allItems.push({
+          id: String(item.id || ''),
+          title: item.title || '',
+          type: Number(item.type || 0),
+          total: Number(item.total || item.appmsg_total || 0),
+        });
+      }
+
+      const totalCount = Number(data.list_resp?.total_count || 0);
+      if (items.length < count || (totalCount > 0 && allItems.length >= totalCount)) break;
+      begin += count;
+    }
+
+    return allItems.filter(item => item.id && item.title);
+  }
+
+  async findAlbumByTitle(title, type = 0) {
+    const targetTitle = String(title || '').trim();
+    if (!targetTitle) return null;
+    const albums = await this.fetchAlbumList(type);
+    return albums.find(album => album.title === targetTitle) || null;
+  }
+
+  /**
+   * 创建普通文章合集
+   * @param {string} title 合集名，微信后台限制 1-30 字
+   * @returns {Promise<{ success: boolean, album_id?: string, album_title?: string, created?: boolean, message?: string }>}
+   */
+  async createArticleAlbum(title) {
+    const albumTitle = String(title || '').trim();
+    if (!albumTitle) return { success: false, message: '合集名不能为空' };
+    if (albumTitle.length > 30) return { success: false, message: `合集名超过 30 字: ${albumTitle}` };
+    if (!this.token) await this.fetchToken();
+
+    const postData = new URLSearchParams({
+      token: this.token,
+      lang: 'zh_CN',
+      f: 'json',
+      ajax: '1',
+      subtype: '0',
+      id: '',
+      type: '0',
+      desc: '',
+      title: albumTitle,
+      is_updating: '1',
+      is_reverse: '1',
+      is_numbered: '1',
+      appmsg_total: '0',
+      sync_version: '1',
+      update_time: '',
+      continous_read_on: '1',
+      update_frequence: '{}',
+      appmsg_info: JSON.stringify({ appmsgkeys: [] }),
+      crop_list: JSON.stringify({ crop_list: [] }),
+      is_wxa_novel: '0',
+    });
+
+    try {
+      const { data } = await this.client.post(
+        `https://mp.weixin.qq.com/cgi-bin/appmsgalbummgr?action=commit&token=${this.token}&lang=zh_CN`,
+        postData.toString(),
+        {
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          maxRedirects: 5,
+          validateStatus: s => s < 500,
+        }
+      );
+
+      if (data.base_resp?.ret === 0) {
+        const albumId = String(data.commit_resp?.id || data.id || '');
+        if (albumId) {
+          return { success: true, album_id: albumId, album_title: albumTitle, created: true };
+        }
+        return { success: false, message: '合集创建成功但未返回 album_id' };
+      }
+
+      const msg = data.base_resp?.err_msg || '创建合集失败';
+      return { success: false, message: `${msg} (ret: ${data.base_resp?.ret || ''})` };
+    } catch (e) {
+      return { success: false, message: e.message };
+    }
+  }
+
+  async ensureArticleAlbum(title) {
+    const albumTitle = String(title || '').trim();
+    if (!albumTitle) return { success: false, message: '合集名不能为空' };
+
+    const existing = await this.findAlbumByTitle(albumTitle, 0);
+    if (existing) {
+      return {
+        success: true,
+        album_id: existing.id,
+        album_title: existing.title,
+        created: false,
+      };
+    }
+
+    return this.createArticleAlbum(albumTitle);
   }
 
   // ==================== 草稿管理 ====================

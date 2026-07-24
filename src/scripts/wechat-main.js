@@ -18,6 +18,13 @@ const { generateTopics, buildWeightedCategoryPlan } = require('../core/topic-gen
 const { ensureLocalMarkdownSynced, loadBjhSyncState, saveBjhSyncState } = require('../core/notion-local-sync');
 const { loadPlatformAccounts, filterAccounts, getAccountCookie } = require('../core/account-config');
 const { loadConfig, saveConfig } = require('../core/config');
+const {
+  ensureWechatAccountDefaults,
+  ensureWechatAlbumsForAccount,
+  resolveWechatApiForAccount,
+  resolveWechatAuthor,
+  resolveWechatWriterId,
+} = require('../core/wechat-account-setup');
 
 const SYNC_STATE_FILE = path.join(__dirname, '../..', 'wx-sync-state.json');
 const LEGACY_SYNC_STATE_FILE = path.join(__dirname, '../..', '.wx-sync-state.json');
@@ -54,6 +61,22 @@ function summarizeCategoryPlan(plan) {
     .join('、');
 }
 
+async function ensureWechatCookieIfNeeded(accountName) {
+  const allAccounts = loadPlatformAccounts('wechat');
+  const account = allAccounts.find(item => item.name === accountName);
+  if (!account) throw new Error(`未找到账号 "${accountName}"`);
+
+  const checked = await resolveWechatApiForAccount(account, allAccounts, { prefix: `[${accountName}] ` });
+  if (checked.success) {
+    if (checked.changed) saveConfig(loadPublishConfig());
+    return;
+  }
+
+  console.log(`[${accountName}] 登录失效，开始扫码更新 Cookie...`);
+  const { cliExtract } = require('../server/wechat-cookie');
+  await cliExtract({ account: accountName });
+}
+
 function buildWechatArticleOptions(category, topArticlesHint) {
   return {
     wordCount: '2500-3000',
@@ -77,9 +100,16 @@ async function tryGenerateTopicForWork({ workName, category, attempts, seenTitle
   return null;
 }
 
-async function generateTopicsWithRetry({ count, workName, categoryPlan, attempts = 3, fallbackWorkNames = [] }) {
+async function generateTopicsWithRetry({
+  count,
+  workName,
+  categoryPlan,
+  attempts = 3,
+  fallbackWorkNames = [],
+  excludedTitles = [],
+}) {
   const collected = [];
-  const seenTitles = new Set();
+  const seenTitles = new Set(excludedTitles.filter(Boolean));
 
   for (let i = 0; i < count; i++) {
     const category = categoryPlan && categoryPlan.length
@@ -299,17 +329,22 @@ program
   .description('检查公众号登录状态')
   .option('-a, --account <name>', '指定账号名称')
   .action(async (opts) => {
-    const accounts = filterAccounts(loadPlatformAccounts('wechat'), opts.account);
+    const publishConfig = loadPublishConfig();
+    const allAccounts = loadPlatformAccounts('wechat');
+    const accounts = filterAccounts(allAccounts, opts.account);
     if (!accounts.length) {
       console.error('没有可用的公众号账号配置');
       return;
     }
     for (const account of accounts) {
       const prefix = account.name !== 'default' ? `[${account.name}] ` : '';
-      const cookie = getAccountCookie(account);
-      const api = new WechatAPI(cookie);
       console.log(`${prefix}公众号:`);
-      await api.checkAuth();
+      const resolved = await resolveWechatApiForAccount(account, allAccounts, { prefix });
+      if (!resolved.success) {
+        console.log(`✗ ${resolved.message}`);
+      } else if (resolved.changed) {
+        saveConfig(publishConfig);
+      }
     }
   });
 
@@ -463,8 +498,9 @@ async function syncOneWork(api, workName, workConfig, opts, accountConfig) {
       // 保存草稿
       console.log('保存草稿...');
       const albumInfo = buildAlbumInfo(workConfig);
-      const author = (accountConfig && accountConfig.author) || loadWechatConfig().author;
-      const writerId = (accountConfig && accountConfig.writer_id) || loadWechatConfig().writer_id;
+      const wechatConfig = loadWechatConfig();
+      const author = resolveWechatAuthor(accountConfig, wechatConfig);
+      const writerId = resolveWechatWriterId(accountConfig, wechatConfig);
       const result = await api.saveDraft(title, html, coverUrl, { albumInfo, author, writerId });
 
       if (result.success) {
@@ -521,8 +557,22 @@ program
   .option('--random [n]', '随机模式：从所有合集中随机抽取 n 个生成（默认 2），每轮重新抽取')
   .option('--per <count>', '随机模式下每个合集生成的文章数', '1')
   .option('--no-push', '仅生成文章，不推送到草稿箱')
+  .option('--auto-cookie', '指定账号未登录时自动打开扫码登录')
   .action(async (work, opts) => {
-    const accounts = filterAccounts(loadPlatformAccounts('wechat'), opts.account);
+    const selectedAccountName = opts.account || '';
+    try {
+      if (opts.autoCookie && selectedAccountName && opts.push !== false) {
+        await ensureWechatCookieIfNeeded(selectedAccountName);
+      }
+    } catch (e) {
+      console.error(e.message);
+      process.exitCode = 1;
+      return;
+    }
+
+    const publishConfig = loadPublishConfig();
+    const allAccounts = loadPlatformAccounts('wechat');
+    const accounts = filterAccounts(allAccounts, selectedAccountName);
     if (!accounts.length) {
       console.error('没有可用的公众号账号配置');
       return;
@@ -530,6 +580,14 @@ program
 
     for (const account of accounts) {
     const prefix = account.name !== 'default' ? `[${account.name}] ` : '';
+    const defaultResult = ensureWechatAccountDefaults(allAccounts, account);
+    if (defaultResult.changed) {
+      saveConfig(publishConfig);
+      if (defaultResult.templateName) {
+        console.log(`${prefix}已按 ${defaultResult.templateName} 补齐公众号作品配置`);
+      }
+    }
+
     const allConfigs = account.works || {};
     const imageDir = path.resolve(DEFAULT_IMAGE_DIR);
     const interval = parseInt(opts.interval) * 1000;
@@ -602,8 +660,8 @@ program
       : fixedWorks.reduce((sum, w) => sum + w.count, 0);
 
     const wechatCombine = account.combine === true;
-    const accountAuthor = account.author || '';
-    const accountWriterId = account.writer_id || '';
+    const accountAuthor = resolveWechatAuthor(account, publishConfig.wechat || {});
+    const accountWriterId = resolveWechatWriterId(account, publishConfig.wechat || {});
 
     // 合并模式下校验不超过 8 篇
     const MAX_COMBINE_ARTICLES = 8;
@@ -636,13 +694,14 @@ program
     // 检查登录
     let api;
     if (opts.push !== false) {
-      const cookie = getAccountCookie(account);
-      api = new WechatAPI(cookie);
-      const auth = await api.checkAuth();
-      if (!auth.success) {
-        console.error(`${prefix}公众号未登录，请先更新 config.json 中该账号的 cookie`);
+      const resolved = await resolveWechatApiForAccount(account, allAccounts, { prefix });
+      if (!resolved.success) {
+        console.error(`${prefix}${resolved.message}`);
         continue;
       }
+      api = resolved.api;
+      const albumResult = await ensureWechatAlbumsForAccount(api, account);
+      if (resolved.changed || albumResult.changed) saveConfig(publishConfig);
     }
 
     const topArticlesHint = null;
@@ -818,7 +877,7 @@ program
         } catch (e) {
           totalFail++;
           console.error(`  ✗ 处理失败: ${e.message}`);
-          allResults.push({ work: actualWorkName, plannedWork: workName, title: t.topic, success: false, message: e.message, _topicObj: t });
+          allResults.push({ work: actualWorkName, plannedWork: workName, title: t.topic, category: t.category, success: false, message: e.message });
         }
       }
     }
@@ -830,6 +889,8 @@ program
       console.log(`  补偿重试：${failedItems.length} 篇失败文章`);
       console.log('─'.repeat(60));
 
+      const usedCompensationTitles = new Set(allResults.map(r => r.title).filter(Boolean));
+
       for (const failedItem of failedItems) {
         const workName = failedItem.work;
         const workConfig = allConfigs[workName] || (worksToGenerate.find(w => w.name === workName) || {}).config;
@@ -838,29 +899,29 @@ program
         console.log(`\n  ▷ 补偿 [${workName}] ${failedItem.title || '(选题失败)'}`);
 
         try {
-          // 如果原来就是选题失败，重新生成选题
-          let topic = failedItem._topicObj;
-          if (!topic) {
-            console.log('  重新生成选题...');
-            const retryCategory = (retryCategoriesByWork[workName] && retryCategoriesByWork[workName].shift())
-              || (categoriesByWork[workName] && categoriesByWork[workName][0])
-              || '数字盘点类';
-            const retryTopics = await generateTopicsWithRetry({
-              count: 1,
-              workName,
-              categoryPlan: [retryCategory],
-              attempts: 3,
-              fallbackWorkNames: availableWorkNames,
-            });
-            if (!retryTopics.length) {
-              console.error(`  ✗ 补偿选题仍然失败: ${workName}`);
-              continue;
-            }
-            topic = retryTopics[0];
-            const actualRetryWork = topic.work || workName;
-            const retryLabel = actualRetryWork === workName ? workName : `${workName} → ${actualRetryWork}`;
-            console.log(`  新选题: [${retryLabel}] [${topic.category}] ${topic.topic}`);
+          console.log('  重新生成新选题...');
+          const retryCategory = failedItem.category
+            || (retryCategoriesByWork[workName] && retryCategoriesByWork[workName].shift())
+            || (categoriesByWork[workName] && categoriesByWork[workName][0])
+            || '数字盘点类';
+          const retryTopics = await generateTopicsWithRetry({
+            count: 1,
+            workName,
+            categoryPlan: [retryCategory],
+            attempts: 3,
+            fallbackWorkNames: availableWorkNames,
+            excludedTitles: [...usedCompensationTitles],
+          });
+          if (!retryTopics.length) {
+            console.error(`  ✗ 补偿选题仍然失败: ${workName}`);
+            continue;
           }
+
+          const topic = retryTopics[0];
+          usedCompensationTitles.add(topic.topic);
+          const actualRetryWork = topic.work || workName;
+          const retryLabel = actualRetryWork === workName ? workName : `${workName} → ${actualRetryWork}`;
+          console.log(`  新选题: [${retryLabel}] [${topic.category}] ${topic.topic}`);
           const actualTopicWork = topic.work || workName;
           const actualTopicConfig = allConfigs[actualTopicWork] || workConfig;
 
@@ -1026,7 +1087,9 @@ program
   .option('--interval <seconds>', '每篇文章之间的间隔秒数', '15')
   .option('--no-auto-images', '不自动配图')
   .action(async (work, opts) => {
-    const accounts = filterAccounts(loadPlatformAccounts('wechat'), opts.account);
+    const publishConfig = loadPublishConfig();
+    const allAccounts = loadPlatformAccounts('wechat');
+    const accounts = filterAccounts(allAccounts, opts.account);
     if (!accounts.length) {
       console.error('没有可用的公众号账号配置');
       process.exitCode = 1;
@@ -1038,6 +1101,13 @@ program
 
     for (const account of accounts) {
       const prefix = account.name !== 'default' ? `[${account.name}] ` : '';
+      const defaultResult = ensureWechatAccountDefaults(allAccounts, account);
+      if (defaultResult.changed) {
+        saveConfig(publishConfig);
+        if (defaultResult.templateName) {
+          console.log(`${prefix}已按 ${defaultResult.templateName} 补齐公众号作品配置`);
+        }
+      }
       const allConfigs = account.works || {};
 
       // 确定要同步的作品列表
@@ -1066,13 +1136,14 @@ program
       }
 
       // 检查登录
-      const cookie = getAccountCookie(account);
-      const api = new WechatAPI(cookie);
-      const auth = await api.checkAuth();
-      if (!auth.success) {
-        console.error(`${prefix}公众号未登录，请先更新 config.json 中该账号的 cookie`);
+      const resolved = await resolveWechatApiForAccount(account, allAccounts, { prefix });
+      if (!resolved.success) {
+        console.error(`${prefix}${resolved.message}`);
         continue;
       }
+      const api = resolved.api;
+      const albumResult = await ensureWechatAlbumsForAccount(api, account);
+      if (resolved.changed || albumResult.changed) saveConfig(publishConfig);
 
       // 逐个作品同步
       let totalSuccess = 0;
@@ -1112,7 +1183,9 @@ program
   .option('-n, --count <n>', '显示数量', '10')
   .option('-a, --account <name>', '指定账号名称')
   .action(async (opts) => {
-    const accounts = filterAccounts(loadPlatformAccounts('wechat'), opts.account);
+    const publishConfig = loadPublishConfig();
+    const allAccounts = loadPlatformAccounts('wechat');
+    const accounts = filterAccounts(allAccounts, opts.account);
     if (!accounts.length) {
       console.error('没有可用的公众号账号配置');
       return;
@@ -1120,13 +1193,13 @@ program
 
     for (const account of accounts) {
       const prefix = account.name !== 'default' ? `[${account.name}] ` : '';
-      const cookie = getAccountCookie(account);
-      const api = new WechatAPI(cookie);
-      const auth = await api.checkAuth();
-      if (!auth.success) {
-        console.error(`${prefix}公众号未登录`);
+      const resolved = await resolveWechatApiForAccount(account, allAccounts, { prefix });
+      if (!resolved.success) {
+        console.error(`${prefix}${resolved.message}`);
         continue;
       }
+      if (resolved.changed) saveConfig(publishConfig);
+      const api = resolved.api;
 
       const topN = parseInt(opts.count);
       console.log(`\n${prefix}拉取文章数据中...`);
@@ -1152,7 +1225,9 @@ program
   .description('列出公众号草稿箱中的所有草稿')
   .option('-a, --account <name>', '指定账号名称')
   .action(async (opts) => {
-    const accounts = filterAccounts(loadPlatformAccounts('wechat'), opts.account);
+    const publishConfig = loadPublishConfig();
+    const allAccounts = loadPlatformAccounts('wechat');
+    const accounts = filterAccounts(allAccounts, opts.account);
     if (!accounts.length) {
       console.error('没有可用的公众号账号配置');
       return;
@@ -1160,13 +1235,13 @@ program
 
     for (const account of accounts) {
       const prefix = account.name !== 'default' ? `[${account.name}] ` : '';
-      const cookie = getAccountCookie(account);
-      const api = new WechatAPI(cookie);
-      const auth = await api.checkAuth();
-      if (!auth.success) {
-        console.error(`${prefix}公众号未登录`);
+      const resolved = await resolveWechatApiForAccount(account, allAccounts, { prefix });
+      if (!resolved.success) {
+        console.error(`${prefix}${resolved.message}`);
         continue;
       }
+      if (resolved.changed) saveConfig(publishConfig);
+      const api = resolved.api;
 
       console.log(`\n${prefix}获取草稿列表...`);
       const { list, total } = await api.listDrafts();
@@ -1185,7 +1260,9 @@ program
   .description('删除草稿箱中所有草稿（仅清除已成功删除的同步记录）')
   .option('-a, --account <name>', '指定账号名称')
   .action(async (opts) => {
-    const accounts = filterAccounts(loadPlatformAccounts('wechat'), opts.account);
+    const publishConfig = loadPublishConfig();
+    const allAccounts = loadPlatformAccounts('wechat');
+    const accounts = filterAccounts(allAccounts, opts.account);
     if (!accounts.length) {
       console.error('没有可用的公众号账号配置');
       return;
@@ -1193,13 +1270,13 @@ program
 
     for (const account of accounts) {
       const prefix = account.name !== 'default' ? `[${account.name}] ` : '';
-      const cookie = getAccountCookie(account);
-      const api = new WechatAPI(cookie);
-      const auth = await api.checkAuth();
-      if (!auth.success) {
-        console.error(`${prefix}公众号未登录`);
+      const resolved = await resolveWechatApiForAccount(account, allAccounts, { prefix });
+      if (!resolved.success) {
+        console.error(`${prefix}${resolved.message}`);
         continue;
       }
+      if (resolved.changed) saveConfig(publishConfig);
+      const api = resolved.api;
 
       console.log(`\n${prefix}获取草稿列表...`);
       const { list } = await api.listDrafts();

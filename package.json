@@ -24,11 +24,13 @@
     "wx:login": "node src/scripts/wechat-main.js login",
     "wx:generate": "node src/scripts/wechat-main.js generate",
     "wx:generate:random": "node src/scripts/wechat-main.js generate --random 2",
+    "wx:generate:random:xushige": "node src/scripts/wechat-main.js generate --random 2 --account 叙世阁 --auto-cookie",
+    "wx:generate:random:canmo": "node src/scripts/wechat-main.js generate --random 2 --account 残墨书斋 --auto-cookie",
     "wx:batch": "node src/scripts/wechat-main.js batch",
     "wx:list": "node src/scripts/wechat-main.js list",
     "wx:clean": "node src/scripts/wechat-main.js clean",
     "wx:cookie": "node src/scripts/wechat-main.js cookie",
-    "help": "node -e \"var h={'check':'检查所有平台登录状态','list':'列出所有文章及状态','batch':'批量生成并发布','batch:dry':'批量生成但不推送','batch:bjh:slot':'百家号分时发布，轮次读config','wx:check':'检查公众号登录状态','wx:generate':'生成文章','wx:generate:random':'随机抽取合集生成发布','wx:batch':'批量生成发布','wx:list':'列出草稿箱','wx:clean':'删除所有草稿','wx:cookie':'扫码提取Cookie','help':'显示本帮助'};Object.keys(h).forEach(k=>console.log('  '+k.padEnd(18)+h[k]))\""
+    "help": "node -e \"var h={'check':'检查所有平台登录状态','list':'列出所有文章及状态','batch':'批量生成并发布','batch:dry':'批量生成但不推送','batch:bjh:slot':'百家号分时发布，轮次读config','wx:check':'检查公众号登录状态','wx:generate':'生成文章','wx:generate:random':'随机抽取合集生成发布','wx:generate:random:xushige':'随机生成叙世阁，未登录自动扫码','wx:generate:random:canmo':'随机生成残墨书斋，未登录自动扫码','wx:batch':'批量生成发布','wx:list':'列出草稿箱','wx:clean':'删除所有草稿','wx:cookie':'扫码提取Cookie','help':'显示本帮助'};Object.keys(h).forEach(k=>console.log('  '+k.padEnd(28)+h[k]))\""
   },
   "dependencies": {
     "axios": "^1.6.0",
