@@ -11,13 +11,14 @@ const fs = require('fs');
 
 const { WechatAPI } = require('../core/wechat-api');
 const { fetchNotionDirectory } = require('../core/notion-fetcher');
-const { mdToHtml, extractImagePaths, excludeTailImagePaths, DEFAULT_IMAGE_DIR, DEFAULT_TAIL_IMAGE } = require('../core/batch-publish');
+const { mdToHtml, extractImagePaths, excludeTailImagePaths, DEFAULT_IMAGE_DIR } = require('../core/batch-publish');
 const { generateArticle } = require('../core/article-generator');
 const { selectCoverImage } = require('../core/image-library');
 const { generateTopics, buildWeightedCategoryPlan } = require('../core/topic-generator');
 const { ensureLocalMarkdownSynced, loadBjhSyncState, saveBjhSyncState } = require('../core/notion-local-sync');
 const { loadPlatformAccounts, filterAccounts, getAccountCookie } = require('../core/account-config');
 const { loadConfig, saveConfig } = require('../core/config');
+const { resolveProjectFile } = require('../core/local-file-utils');
 const {
   ensureWechatAccountDefaults,
   ensureWechatAlbumsForAccount,
@@ -83,6 +84,16 @@ function buildWechatArticleOptions(category, topArticlesHint) {
     maxTokens: 7000,
     topArticlesHint,
   };
+}
+
+function resolveWechatTailImage(accountConfig) {
+  if (!accountConfig || !accountConfig.tail_image) return null;
+
+  const resolved = resolveProjectFile(accountConfig.tail_image);
+  if (resolved && fs.existsSync(resolved)) return resolved;
+
+  console.warn(`  尾图文件不存在，跳过: ${accountConfig.tail_image}`);
+  return null;
 }
 
 async function tryGenerateTopicForWork({ workName, category, attempts, seenTitles }) {
@@ -360,6 +371,7 @@ async function syncOneWork(api, workName, workConfig, opts, accountConfig) {
   const interval = parseInt(opts.interval) * 1000;
   const bjhSyncState = loadBjhSyncState();
   const accountName = accountConfig ? accountConfig.name : undefined;
+  const accountTailImage = resolveWechatTailImage(accountConfig);
 
   console.log(`\n${'='.repeat(50)}`);
   console.log(`  作品: ${workName}`);
@@ -453,8 +465,8 @@ async function syncOneWork(api, workName, workConfig, opts, accountConfig) {
       saveArticleArchive(title, finalMarkdown, WX_SYNC_DIR);
 
       // 尾图
-      const tailImage = DEFAULT_TAIL_IMAGE;
-      if (tailImage && fs.existsSync(tailImage)) {
+      const tailImage = accountTailImage;
+      if (tailImage) {
         finalMarkdown += `\n\n![尾图](${tailImage})\n`;
       }
 
@@ -662,6 +674,7 @@ program
     const wechatCombine = account.combine === true;
     const accountAuthor = resolveWechatAuthor(account, publishConfig.wechat || {});
     const accountWriterId = resolveWechatWriterId(account, publishConfig.wechat || {});
+    const accountTailImage = resolveWechatTailImage(account);
 
     // 合并模式下校验不超过 8 篇
     const MAX_COMBINE_ARTICLES = 8;
@@ -829,8 +842,8 @@ program
 
           // 2. 追加尾图
           let finalMarkdown = content;
-          const tailImage = DEFAULT_TAIL_IMAGE;
-          if (tailImage && fs.existsSync(tailImage)) {
+          const tailImage = accountTailImage;
+          if (tailImage) {
             finalMarkdown += `\n\n![尾图](${tailImage})\n`;
           }
 
@@ -939,8 +952,8 @@ program
 
           if (opts.push !== false) {
             let finalMarkdown = content;
-            const tailImage = DEFAULT_TAIL_IMAGE;
-            if (tailImage && fs.existsSync(tailImage)) {
+            const tailImage = accountTailImage;
+            if (tailImage) {
               finalMarkdown += `\n\n![尾图](${tailImage})\n`;
             }
             let html = mdToHtml(finalMarkdown, 'wechat');
