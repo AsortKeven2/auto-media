@@ -44,6 +44,11 @@ function usesFeaturedTitleLogic(platform) {
   return FEATURED_TITLE_PLATFORMS.has(platform);
 }
 
+function isLowValueReversalTitle(title) {
+  if (typeof title !== 'string') return false;
+  return /(?:(?:先)?别|(?:先)?不要)(?:再|只|光|急着|忙着)*骂/.test(title.replace(/\s+/g, ''));
+}
+
 function shuffleArray(items) {
   const arr = [...items];
   for (let i = arr.length - 1; i > 0; i--) {
@@ -277,6 +282,10 @@ async function generateTopics(count = 10, workFilter = null, platform = 'baijiah
     for (let idx = 0; idx < topics.length; idx++) {
       const t = topics[idx];
       if (!t.topic) continue;
+      if (isLowValueReversalTitle(t.topic)) {
+        console.warn(`  跳过低价值劝骂式选题: ${t.topic}`);
+        continue;
+      }
       if (allHistory[work].includes(t.topic)) continue;
       const category = getCategoryFn(idx);
       allHistory[work].push(t.topic);
@@ -308,6 +317,7 @@ ${topArticlesHint}
 5. 不要与已有选题重复或相似
 6. 标题禁止出现任何英文字母和阿拉伯数字，数字一律用汉字表达
 7. 如果是跨作品对比，必须在 related_works 字段中列出所有相关作品
+8. 禁止使用“别再骂”“别只骂”“不要骂”“先别骂”等劝读者不要批评角色的标题模板
 
 输出格式（严格 JSON 数组）：
 [{"topic": "标题", "category": "热文风格", "main_character": "核心角色", "characters": ["角色1", "角色2"], "related_works": ["作品1", "作品2"]}]`;
@@ -368,9 +378,10 @@ ${topArticlesHint}
 - 示例句式："三国十大战将之死，谁最让人意难平""瓦岗诸将结局盘点，善终者为何这么少"
 
 类型7 - 冷门翻案/低估角色：
-- 给冷门角色、被骂角色、被低估选择重新估值，适合"冷门翻案类"
-- 标题必须承认争议，但给出新角度，不能硬洗
-- 示例句式："别只骂XX，他当时已经没路可退""很多人小看XX，其实他最懂局势"
+- 给冷门角色、边缘人物或被低估的选择重新估值，适合"冷门翻案类"
+- 标题必须落到具体贡献、具体处境或关键选择，给出新角度但不能硬洗
+- 禁止使用“别再骂XX”“别只骂XX”“不要骂XX”“先别骂XX”等劝读者不要批评角色的句式
+- 示例句式："很多人小看XX，他在三次危局里都选对了""XX最容易被忽略的贡献，恰好救了全局"
 
 类型8 - 细节深挖/伏笔暗线：
 - 聚焦影视剧或原著中容易被忽略的细节、伏笔、暗线，适合"细节深挖类"
@@ -460,7 +471,8 @@ ${topArticlesHint}
 5. 每个选题标注所属类别
 6. 如果是跨作品对比，必须在 related_works 字段中列出所有相关作品
 7. 不要全部标题都用问号结尾，句式随机发挥
-8. 标题禁止出现任何英文字母和阿拉伯数字，数字一律用汉字表达`;
+8. 标题禁止出现任何英文字母和阿拉伯数字，数字一律用汉字表达
+9. 禁止使用“别再骂”“别只骂”“不要骂”“先别骂”等劝读者不要批评角色的标题模板`;
 
     const normalPrompt = `为${platformLabel}生成 ${normalCount} 个关于《${work}》的爆款选题。
 ${historyText}
@@ -508,4 +520,4 @@ function listWorks() {
   }
 }
 
-module.exports = { generateTopics, listWorks, buildWeightedCategoryPlan };
+module.exports = { generateTopics, listWorks, buildWeightedCategoryPlan, isLowValueReversalTitle };

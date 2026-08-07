@@ -379,6 +379,87 @@ function stripLastSectionImages(article) {
   return before + cleaned;
 }
 
+function countArticleTextCharacters(markdown) {
+  return String(markdown || '')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+    .replace(/\s/g, '')
+    .replace(/[#*\-\[\]()]/g, '')
+    .length;
+}
+
+function parseWordCountRange(wordCount) {
+  const values = String(wordCount || '').match(/\d+/g)?.map(Number) || [];
+  if (values.length < 2 || values.some(value => !Number.isFinite(value))) return null;
+  return { min: Math.min(values[0], values[1]), max: Math.max(values[0], values[1]) };
+}
+
+function getAcceptedWordCountMax(targetMax, overflowRatio = 0.3) {
+  const ratio = Number.isFinite(Number(overflowRatio)) ? Math.max(0, Number(overflowRatio)) : 0.3;
+  return Math.floor(targetMax * (1 + ratio));
+}
+
+async function enforceArticleWordCount(article, category, opts, maxTokens) {
+  if (opts.enforceWordCount !== true) return article;
+
+  const range = parseWordCountRange(opts.wordCount);
+  if (!range) return article;
+
+  let current = article;
+  let currentCount = countArticleTextCharacters(current);
+  const acceptedMax = getAcceptedWordCountMax(range.max, opts.wordCountOverflowRatio);
+  if (currentCount >= range.min && currentCount <= acceptedMax) return current;
+
+  const targetMin = range.min + Math.min(100, Math.floor((range.max - range.min) * 0.2));
+  const targetMax = range.max - Math.min(150, Math.floor((range.max - range.min) * 0.3));
+  const isRankingCategory = RANKING_CATEGORIES.has(category);
+  let lastIssue = '';
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const direction = currentCount > acceptedMax ? '压缩' : '补充';
+    const prompt = `请把下面这篇微信公众号文章${direction}到纯正文 ${targetMin}-${targetMax} 字。
+
+当前纯正文字数：${currentCount} 字
+类别：${category}
+
+要求：
+- 保留原标题、核心观点、具体原著/影视情节和 Markdown 层级
+- 只调整篇幅，不改变人物、事件、胜负、排名和事实关系
+- 保留必要的人物配图标记，配图名称不得改成场景描述
+- 如果是榜单，排名数量、顺序、角色必须与原稿一致，每个角色只能上榜一次
+- 不要加入写作说明、字数说明、自我纠正或修改痕迹
+- 只输出修改后的完整 Markdown 定稿
+${lastIssue ? `- 上次调整仍有问题：${lastIssue}` : ''}
+
+原稿：
+${current}`;
+
+    const rewritten = await callLLM(prompt, { maxTokens });
+    if (!rewritten) {
+      lastIssue = 'AI 返回为空';
+      continue;
+    }
+
+    current = rewritten;
+    if (isRankingCategory) {
+      const validation = validateRankingArticle(current);
+      current = validation.article;
+      if (!validation.valid) {
+        lastIssue = validation.errors.join('；');
+        currentCount = countArticleTextCharacters(current);
+        continue;
+      }
+    }
+
+    currentCount = countArticleTextCharacters(current);
+    if (currentCount >= range.min && currentCount <= acceptedMax) return current;
+    lastIssue = `纯正文字数仍为 ${currentCount}，目标 ${range.min}-${range.max}，最多允许 ${acceptedMax}`;
+  }
+
+  throw new Error(
+    `文章字数校验失败：纯正文 ${currentCount} 字，目标 ${range.min}-${range.max} 字，最多允许 ${acceptedMax} 字`
+  );
+}
+
 /**
  * 生成文章（AI 自主决定配图）
  */
@@ -424,6 +505,8 @@ async function generateArticle(topic, outline, work, characters, imageDir, categ
 
     throw new Error(`${category}结构校验失败：${validation.errors.join('；')}`);
   }
+
+  article = await enforceArticleWordCount(article, category, opts, maxTokens);
 
   let imageStats = { matched: [], missing: [] };
 
@@ -499,5 +582,6 @@ ${markdown}`;
 module.exports = {
   generateArticle,
   insertImages,
+  getAcceptedWordCountMax,
   detectWorksFromTitle,
 };

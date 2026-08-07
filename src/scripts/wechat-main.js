@@ -81,6 +81,8 @@ async function ensureWechatCookieIfNeeded(accountName) {
 function buildWechatArticleOptions(category, topArticlesHint) {
   return {
     wordCount: '2500-3000',
+    enforceWordCount: true,
+    wordCountOverflowRatio: 0.3,
     maxTokens: 7000,
     topArticlesHint,
   };
