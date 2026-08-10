@@ -58,12 +58,22 @@ function shuffleArray(items) {
   return arr;
 }
 
-function buildWeightedCategoryPlan(totalCount) {
+function buildWeightedCategoryPlan(totalCount, allowedCategories = null) {
   const count = Math.max(0, Math.floor(Number(totalCount) || 0));
   if (!count) return [];
 
-  const totalWeight = FEATURED_CATEGORY_WEIGHTS.reduce((sum, item) => sum + item.weight, 0);
-  const weighted = FEATURED_CATEGORY_WEIGHTS.map(item => {
+  const normalizedNames = Array.isArray(allowedCategories)
+    ? [...new Set(allowedCategories.filter(name => Boolean(CATEGORIES[name])))]
+    : null;
+  const selectedNames = normalizedNames && normalizedNames.length ? normalizedNames : null;
+  const sourceWeights = selectedNames
+    ? selectedNames.map(name => {
+      const configured = FEATURED_CATEGORY_WEIGHTS.find(item => item.name === name);
+      return configured || { name, weight: 1 };
+    })
+    : FEATURED_CATEGORY_WEIGHTS;
+  const totalWeight = sourceWeights.reduce((sum, item) => sum + item.weight, 0);
+  const weighted = sourceWeights.map(item => {
     const exact = (count * item.weight) / totalWeight;
     const base = Math.floor(exact);
     return {
@@ -98,12 +108,16 @@ function getNormalCategories(platform) {
   return usesFeaturedTitleLogic(platform)
     ? FEATURED_WEIGHTED_CATEGORY_POOL
     : Object.entries(CATEGORIES)
-      .filter(([name, cat]) => name !== '热文风格' && !cat.featuredTitleOnly)
+      .filter(([name, cat]) => (
+        name !== '热文风格'
+        && !cat.featuredTitleOnly
+        && (!cat.platforms || cat.platforms.includes(platform))
+      ))
       .map(([name]) => name);
 }
 
 function buildCategoryPromptSectionForPlatform(platform) {
-  if (!usesFeaturedTitleLogic(platform)) return buildCategoryPromptSection();
+  if (!usesFeaturedTitleLogic(platform)) return buildCategoryPromptSection(platform);
 
   return FEATURED_NORMAL_CATEGORIES.map(name => {
     const cat = CATEGORIES[name];
@@ -204,9 +218,19 @@ function saveHistory(allHistory) {
 async function generateTopics(count = 10, workFilter = null, platform = 'baijiahao', topArticlesHint = null, explicitHotCount = null, categoryOverrides = null) {
   const works = listWorks();
   const allHistory = loadPerNovelHistory();
+  const normalizedOverrides = Array.isArray(categoryOverrides)
+    ? categoryOverrides.filter(name => Boolean(CATEGORIES[name]))
+    : null;
+  const standaloneMode = Boolean(
+    normalizedOverrides
+    && normalizedOverrides.length
+    && normalizedOverrides.every(name => CATEGORIES[name].standalone)
+  );
 
-  let allWorks = works;
-  if (workFilter) {
+  let allWorks = standaloneMode
+    ? [workFilter || normalizedOverrides[0]]
+    : works;
+  if (!standaloneMode && workFilter) {
     allWorks = works.filter(w => w === workFilter);
   }
 
@@ -216,9 +240,12 @@ async function generateTopics(count = 10, workFilter = null, platform = 'baijiah
   }
 
   const work = allWorks[Math.floor(Math.random() * allWorks.length)];
+  const historyKey = standaloneMode
+    ? `__category__${normalizedOverrides[0]}`
+    : work;
 
   // 只取当前作品最近 50 条历史用于去重
-  const novelHistory = (allHistory[work] || []).slice(-50);
+  const novelHistory = (allHistory[historyKey] || []).slice(-50);
   const historyText = novelHistory.length
     ? '\n已有选题（请勿重复或相似）：\n' + novelHistory.map(t => `- ${t}`).join('\n')
     : '';
@@ -238,9 +265,6 @@ async function generateTopics(count = 10, workFilter = null, platform = 'baijiah
   // 本地随机分配类别。微信/百家号支持外部传入全局分类配额，避免每本小说各自洗牌；
   // 热文风格只服务于微信热文参考，不参与常规随机选题。
   let assignedCategories = [];
-  const normalizedOverrides = Array.isArray(categoryOverrides)
-    ? categoryOverrides.filter(name => Boolean(CATEGORIES[name]))
-    : null;
   if (normalizedOverrides && normalizedOverrides.length >= normalCount) {
     assignedCategories = normalizedOverrides.slice(0, normalCount);
   } else {
@@ -252,7 +276,7 @@ async function generateTopics(count = 10, workFilter = null, platform = 'baijiah
     }
   }
 
-  if (!allHistory[work]) allHistory[work] = [];
+  if (!allHistory[historyKey]) allHistory[historyKey] = [];
   const results = [];
 
   // ── 辅助：解析 AI 返回并收集结果 ──
@@ -286,17 +310,18 @@ async function generateTopics(count = 10, workFilter = null, platform = 'baijiah
         console.warn(`  跳过低价值劝骂式选题: ${t.topic}`);
         continue;
       }
-      if (allHistory[work].includes(t.topic)) continue;
       const category = getCategoryFn(idx);
-      allHistory[work].push(t.topic);
+      if (allHistory[historyKey].includes(t.topic)) continue;
+      allHistory[historyKey].push(t.topic);
+      const standaloneCategory = Boolean(CATEGORIES[category]?.standalone);
       results.push({
         topic: t.topic,
         category,
         type: category,
         work,
-        main_character: t.main_character || (t.characters && t.characters[0]) || '',
-        characters: t.characters || [],
-        related_works: t.related_works || [work],
+        main_character: standaloneCategory ? '' : (t.main_character || (t.characters && t.characters[0]) || ''),
+        characters: standaloneCategory ? [] : (t.characters || []),
+        related_works: standaloneCategory ? [] : (t.related_works || [work]),
       });
     }
   }
@@ -333,6 +358,54 @@ ${topArticlesHint}
     } catch (e) {
       console.error(`  热文风格选题生成失败: ${work} — ${e.message}`);
     }
+  }
+
+  if (standaloneMode && normalCount > 0) {
+    const categoryName = normalizedOverrides[0];
+    const category = CATEGORIES[categoryName];
+    const standalonePrompt = `为微信公众号生成 ${normalCount} 个“${categoryName}”选题。
+${historyText}
+
+【账号定位】
+${category.subtitle}。读者打开文章后，可以直接挑选其中的短句复制到朋友圈。内容不关联任何影视剧、小说、角色或作品。
+
+【标题方向】
+1. 人格标签型：清醒、通透、自信、有气质、高情商、落落大方、情绪稳定、边界感
+2. 旺自己型：停止内耗、好好爱自己、提升状态、积攒福气、认真搞钱、保持好心态
+3. 关系疗愈型：放下、释怀、不纠缠、体面离开、守住分寸、降低期待
+4. 时间节点型：月初、月末、周末、节气、生日、新阶段
+
+【常用标题结构】
+- 真正{人格标签}的女人，会这样记录朋友圈
+- {状态}的你，可以这样发朋友圈
+- 女人这样记录生活，不为{误解}，只为{正向结果}
+- {时间节点}，这些朋友圈文案温暖又走心
+- {关系痛点}最好的方式，不是A，不是B，而是{答案}
+
+【严格要求】
+1. 每个标题都必须明确包含“女人”“朋友圈”“文案”或具体女性状态中的至少一项
+2. 标题控制在十六到三十个汉字，不写作品名、角色名和剧情
+3. 同一批标题不要连续使用相同开头或相同人格标签
+4. 可以使用“秒赞”“超赞”“很走心”等情绪词，但禁止承诺百分之百有效、必定转运或保证发财
+5. 不要与已有标题重复或近似，不要照搬任何参考公众号的完整标题
+6. 所有选题的 category 固定为“${categoryName}”
+
+输出格式（严格 JSON 数组）：
+[{"topic":"标题","category":"${categoryName}","main_character":"","characters":[],"related_works":[]}]`;
+
+    try {
+      const standaloneContent = await callLLM(standalonePrompt, { maxTokens: 2000 });
+      if (standaloneContent) {
+        parseAndCollect(standaloneContent, normalCount, () => categoryName);
+      } else {
+        console.error(`  ${categoryName}选题生成失败 — AI 返回为空`);
+      }
+    } catch (e) {
+      console.error(`  ${categoryName}选题生成失败 — ${e.message}`);
+    }
+
+    saveHistory(allHistory);
+    return results;
   }
 
   // ── 第二批：正常分类 ──

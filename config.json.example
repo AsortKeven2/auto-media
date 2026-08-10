@@ -55,6 +55,7 @@
         "author": "作者名",
         "writer_id": "作者ID",
         "combine": true,
+        "past_recommendations_count": 10,
         "hot_articles_reference": [
           "黄药师为何独独不认杨过？",
           "梁山真正看透宋江的人是谁？"

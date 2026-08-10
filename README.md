@@ -88,8 +88,24 @@ images/
   - `author`: 文章原创作者名
   - `writer_id`: 作者ID
   - `combine`: `true`=多篇文章合并为一个多图文草稿，`false`=逐篇保存独立草稿（微信最多合并 8 篇）
+  - `image_dirs`: 账号级图片素材目录，例如 `["女性朋友圈文案"]`，优先于作品级 `image_dirs`
+  - `cover_image`: 素材池没有可用封面时使用的账号级兜底封面
+  - `past_recommendations_count`: 该账号生成文章尾部的“往期精彩文章推荐”数量；按已群发文章倒序读取，历史不足时使用实际可用数量，未配置或设为 `0` 时关闭
   - `hot_articles_reference`: 公众号热文标题列表（可选），手动指定的”热文参考标题”。配置后直接作为参考注入选题和写作；未配置时自动读取公众号热文标题
   - `works`: 各作品配置，每个作品可配置 `count`（AI 生成篇数）、`notionUrl`（Notion 同步）、`album_id`/`album_title`（合集）、`image_dirs`（配图目录）
+
+女性朋友圈文案通过生成命令临时指定类别，不限制公众号账号。图片可选配置为：
+
+```json
+{
+  "name": "新公众号名称",
+  "image_dirs": ["女性朋友圈文案"],
+  "cover_image": "./images/女性朋友圈文案/封面.jpg",
+  "past_recommendations_count": 10
+}
+```
+
+该类别把 700-2000 字作为软范围，通常以 1200-1500 字为参考，不会因字数偏离而强制重写，也不会要求固定条数或硬凑篇幅。正文默认不插入影视角色图，封面会从 `images/女性朋友圈文案/` 中选择比例接近 3:2 的图片。素材建议使用自有图片、明确授权的图库图片或 AI 生成图片，不要直接搬运其他公众号配图。适合的素材方向包括花朵、咖啡、书桌、城市散步、女性背影和明亮的日常生活场景。
 
 ## 使用
 
@@ -148,6 +164,7 @@ node src/scripts/wechat-main.js generate               # 按配置生成所有�
 node src/scripts/wechat-main.js generate 西游记         # 仅生成指定作品
 node src/scripts/wechat-main.js generate --no-push     # 仅生成不推送
 node src/scripts/wechat-main.js generate --rounds 3    # 执行3轮（批量生成多天文章）
+node src/scripts/wechat-main.js generate --account 叙世阁 --category 女性朋友圈文案类 --no-push  # 现有账号临时生成朋友圈文案
 
 # 热文排行（公众号）
 node src/scripts/wechat-main.js top                    # 查看阅读量排行
@@ -181,7 +198,15 @@ npm run batch:bjh:slot # 百家号分时发布，轮次读config
 npm run batch:tt       # 仅发头条
 npm run wx:batch       # 微信公众号批量同步
 npm run wx:list        # 列出公众号草稿
+npm run wx:generate:wenan -- --account 新公众号名称  # 生成女性朋友圈文案账号文章
 npm run help           # 显示所有命令
+```
+
+`wx:generate:wenan` 不绑定具体账号名，命令会在本次运行中指定 `女性朋友圈文案类`，不会修改账号配置，也不影响该账号下次生成其他类别。首次只建议使用 `--no-push` 检查生成效果：
+
+```bash
+npm run wx:generate:wenan -- --account 新公众号名称 --no-push
+npm run wx:generate:wenan -- --account 叙世阁 --no-push
 ```
 
 ### 热文参考

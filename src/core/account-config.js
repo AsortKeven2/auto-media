@@ -33,6 +33,11 @@ function normalizePlatformAccounts(platformConfig, platform) {
     if (platformConfig.writer_id) account.writer_id = platformConfig.writer_id;
     if (platformConfig.combine !== undefined) account.combine = platformConfig.combine;
     if (platformConfig.hot_articles_reference) account.hot_articles_reference = platformConfig.hot_articles_reference;
+    if (platformConfig.image_dirs) account.image_dirs = platformConfig.image_dirs;
+    if (platformConfig.cover_image) account.cover_image = platformConfig.cover_image;
+    if (platformConfig.past_recommendations_count !== undefined) {
+      account.past_recommendations_count = platformConfig.past_recommendations_count;
+    }
   }
 
   return [account];

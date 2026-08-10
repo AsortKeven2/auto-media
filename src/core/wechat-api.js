@@ -636,6 +636,43 @@ class WechatAPI {
     }
   }
 
+  /**
+   * 获取最近已群发文章，供正文末尾的“往期精彩文章推荐”使用。
+   * 按需向前翻页，不修改公众号内容或本地配置。
+   */
+  async fetchPastRecommendations(limit = 10) {
+    const max = Math.max(0, Math.floor(Number(limit)) || 0);
+    if (!max) return [];
+
+    const recommendations = [];
+    const seenUrls = new Set();
+    const pageSize = 10;
+    let begin = 0;
+    let totalCount = Number.POSITIVE_INFINITY;
+
+    while (recommendations.length < max && begin < totalCount) {
+      const result = await this.fetchSentList(begin, pageSize);
+      const list = result.list || [];
+      totalCount = Number(result.totalCount) || 0;
+
+      for (const item of list) {
+        for (const article of item.appmsg_info || []) {
+          const title = String(article.title || '').trim();
+          const url = String(article.content_url || article.link || article.url || '').trim();
+          if (!title || !/^https:\/\/mp\.weixin\.qq\.com\/s(?:[/?#]|$)/i.test(url) || seenUrls.has(url)) continue;
+          seenUrls.add(url);
+          recommendations.push({ title, url });
+          if (recommendations.length >= max) return recommendations;
+        }
+      }
+
+      if (list.length < pageSize) break;
+      begin += pageSize;
+    }
+
+    return recommendations;
+  }
+
   // ==================== 草稿列表 ====================
 
   /**

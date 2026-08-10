@@ -203,6 +203,7 @@ function validateRankingArticle(article) {
 function buildPrompt(topic, outline, work, imageList, category, opts = {}) {
   const catDef = category ? getCategory(category) : null;
   const wordCount = opts.wordCount || (catDef && catDef.maxWords);
+  const isStandalone = Boolean(catDef && catDef.standalone);
 
   let writingRequirements = catDef
     ? catDef.articlePrompt
@@ -246,25 +247,43 @@ function buildPrompt(topic, outline, work, imageList, category, opts = {}) {
     ? `\n【参考：热文标题/特征】\n${opts.topArticlesHint}\n在写作时适当借鉴其中的标题风格、选题角度和读者兴趣点，但不要生硬模仿。\n`
     : '';
 
-  return `根据以下选题，写一篇百家号文章。
+  const subjectSection = isStandalone
+    ? `内容方向：${catDef.label}`
+    : `作品：${work}`;
+  const imageSection = catDef && catDef.allowInlineImages === false
+    ? '可用配图：正文不需要插入配图标记。'
+    : `可用配图：\n${imageList}`;
+  const imageRequirement = catDef && catDef.allowInlineImages === false
+    ? '- 正文不要插入任何图片标记，配图只由发布流程处理封面或尾图。'
+    : '- 每 300 字左右插入一张配图，格式：![配图](名称)，如 ![配图](郭襄)';
+  const imageDetails = catDef && catDef.allowInlineImages === false
+    ? ''
+    : `- 名称必须从上面的可用配图列表中原样选取（如"郭襄""周瑜""孙悟空"），严禁使用场景描述（如"白衣渡江""水淹七军"），找不到匹配角色宁可不插图
+- 配图选择必须与当前段落讨论的角色相关，不要随便插一个不相关的角色图
+- 最后一个章节不插图`;
+  const openingRequirement = isStandalone
+    ? '- 开头直接进入女性读者的情绪或使用场景，不要提影视、原著、角色或作品。'
+    : '- 开头方式要多样化，不要每篇都用"看了这么多年XXX"或"有没有人跟我一样"这种固定句式，可以灵活使用：直接抛出疑问、描写具体场景、引用名场面、对比反差、读者共鸣等多种开头方式';
+  const outputFormat = isStandalone
+    ? `输出 Markdown 格式，第一行使用 # ${topic} 作为标题；不要使用 ## 章节标题，正文用普通段落和编号短句排版，不要输出额外说明。`
+    : '输出 Markdown 格式，# 大标题，## 小标题（禁止用 **粗体** 代替 ## 标题），不要输出额外说明。';
+
+  return `根据以下选题，写一篇${isStandalone ? '微信公众号短文案合集' : '百家号文章'}。
 
 选题：${topic}
-作品：${work}
+${subjectSection}
 类别：${category || '自由'}
 ${outlineSection}
-可用配图：
-${imageList}
+${imageSection}
 
 ${writingRequirements}
 ${topArticlesHint}
-- 每 300 字左右插入一张配图，格式：![配图](名称)，如 ![配图](郭襄)
-- 名称必须从上面的可用配图列表中原样选取（如"郭襄""周瑜""孙悟空"），严禁使用场景描述（如"白衣渡江""水淹七军"），找不到匹配角色宁可不插图
-- 配图选择必须与当前段落讨论的角色相关，不要随便插一个不相关的角色图
+${imageRequirement}
+${imageDetails}
 - 只输出最终定稿，严禁输出任何思考过程、自我纠正、犹豫、重写（如"不对""哦对了""等等""重新来""重新整理""咱们重新"等）。如果写到一半发现前面有问题，直接从头输出正确版本，不要保留错误版本和修改痕迹
-- 最后一个章节不插图
-- 开头方式要多样化，不要每篇都用"看了这么多年XXX"或"有没有人跟我一样"这种固定句式，可以灵活使用：直接抛出疑问、描写具体场景、引用名场面、对比反差、读者共鸣等多种开头方式
+${openingRequirement}
 
-输出 Markdown 格式，# 大标题，## 小标题（禁止用 **粗体** 代替 ## 标题），不要输出额外说明。`;
+${outputFormat}`;
 }
 
 /**
@@ -403,6 +422,8 @@ async function enforceArticleWordCount(article, category, opts, maxTokens) {
 
   const range = parseWordCountRange(opts.wordCount);
   if (!range) return article;
+  const catDef = category ? getCategory(category) : null;
+  const isStandalone = Boolean(catDef?.standalone);
 
   let current = article;
   let currentCount = countArticleTextCharacters(current);
@@ -412,6 +433,12 @@ async function enforceArticleWordCount(article, category, opts, maxTokens) {
   const targetMin = range.min + Math.min(100, Math.floor((range.max - range.min) * 0.2));
   const targetMax = range.max - Math.min(150, Math.floor((range.max - range.min) * 0.3));
   const isRankingCategory = RANKING_CATEGORIES.has(category);
+  const preservationRequirement = isStandalone
+    ? '- 保留原标题、开头引导、编号短句、统一 emoji 和结语；每条短句仍需能够独立复制发布'
+    : '- 保留原标题、核心观点、具体原著/影视情节和 Markdown 层级';
+  const consistencyRequirement = isStandalone
+    ? '- 保持原来的女性状态主题，不要加入影视人物、案例、新闻、数据或事实性承诺'
+    : '- 只调整篇幅，不改变人物、事件、胜负、排名和事实关系';
   let lastIssue = '';
 
   for (let attempt = 1; attempt <= 2; attempt++) {
@@ -422,8 +449,8 @@ async function enforceArticleWordCount(article, category, opts, maxTokens) {
 类别：${category}
 
 要求：
-- 保留原标题、核心观点、具体原著/影视情节和 Markdown 层级
-- 只调整篇幅，不改变人物、事件、胜负、排名和事实关系
+${preservationRequirement}
+${consistencyRequirement}
 - 保留必要的人物配图标记，配图名称不得改成场景描述
 - 如果是榜单，排名数量、顺序、角色必须与原稿一致，每个角色只能上榜一次
 - 不要加入写作说明、字数说明、自我纠正或修改痕迹
@@ -467,9 +494,13 @@ async function generateArticle(topic, outline, work, characters, imageDir, categ
   const catDef = category ? getCategory(category) : null;
   const maxTokens = opts.maxTokens || (catDef ? catDef.maxTokens : 10000);
 
-  // 如果有 relatedWorks，使用它作为图片目录列表；否则只用 work
-  const allowedGroups = relatedWorks && relatedWorks.length > 0 ? relatedWorks : (work ? [work] : []);
-  const imageList = imageDir ? buildImageList(imageDir, work, allowedGroups) : '';
+  // 账号可为独立内容类别指定专属素材目录；否则继续按关联作品取图。
+  const allowedGroups = Array.isArray(opts.imageGroups)
+    ? opts.imageGroups
+    : (relatedWorks && relatedWorks.length > 0 ? relatedWorks : (work ? [work] : []));
+  const imageList = imageDir && catDef?.allowInlineImages !== false
+    ? buildImageList(imageDir, work, allowedGroups)
+    : '';
   const basePrompt = buildPrompt(topic, outline, work, imageList, category, opts);
   const isRankingCategory = RANKING_CATEGORIES.has(category);
   const maxAttempts = isRankingCategory ? 3 : 1;
@@ -507,6 +538,10 @@ async function generateArticle(topic, outline, work, characters, imageDir, categ
   }
 
   article = await enforceArticleWordCount(article, category, opts, maxTokens);
+
+  if (catDef?.allowInlineImages === false) {
+    article = article.replace(/!\[[^\]]*\]\([^)]*\)/g, '');
+  }
 
   let imageStats = { matched: [], missing: [] };
 

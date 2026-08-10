@@ -15,6 +15,7 @@ const { mdToHtml, extractImagePaths, excludeTailImagePaths, DEFAULT_IMAGE_DIR } 
 const { generateArticle } = require('../core/article-generator');
 const { selectCoverImage } = require('../core/image-library');
 const { generateTopics, buildWeightedCategoryPlan } = require('../core/topic-generator');
+const { getCategory } = require('../core/categories');
 const { ensureLocalMarkdownSynced, loadBjhSyncState, saveBjhSyncState } = require('../core/notion-local-sync');
 const { loadPlatformAccounts, filterAccounts, getAccountCookie } = require('../core/account-config');
 const { loadConfig, saveConfig } = require('../core/config');
@@ -78,13 +79,49 @@ async function ensureWechatCookieIfNeeded(accountName) {
   await cliExtract({ account: accountName });
 }
 
-function buildWechatArticleOptions(category, topArticlesHint) {
+function normalizeStringList(value) {
+  if (Array.isArray(value)) {
+    return [...new Set(value.map(item => String(item || '').trim()).filter(Boolean))];
+  }
+  if (typeof value === 'string' && value.trim()) {
+    return [...new Set(value.split(',').map(item => item.trim()).filter(Boolean))];
+  }
+  return [];
+}
+
+function resolveGenerationCategories(categoryName) {
+  const requested = normalizeStringList(categoryName);
+  if (!requested.length) return [];
+
+  const invalid = requested.filter(name => !getCategory(name));
+  if (invalid.length) {
+    throw new Error(`未知生成类别: ${invalid.join('、')}`);
+  }
+
+  return requested;
+}
+
+function resolveWechatImageGroups(category, accountConfig, workConfig, workName) {
+  const accountGroups = normalizeStringList(accountConfig?.image_dirs);
+  if (accountGroups.length) return accountGroups;
+
+  const catDef = getCategory(category);
+  if (catDef?.defaultImageDir) return [catDef.defaultImageDir];
+
+  const workGroups = normalizeStringList(workConfig?.image_dirs);
+  return workGroups.length ? workGroups : (workName ? [workName] : []);
+}
+
+function buildWechatArticleOptions(category, topArticlesHint, accountConfig, workConfig, workName) {
+  const catDef = getCategory(category);
+  const isStandalone = Boolean(catDef?.standalone);
   return {
-    wordCount: '2500-3000',
-    enforceWordCount: true,
+    wordCount: isStandalone ? catDef.maxWords : '2500-3000',
+    enforceWordCount: isStandalone ? catDef.enforceWordCount === true : true,
     wordCountOverflowRatio: 0.3,
-    maxTokens: 7000,
+    maxTokens: isStandalone ? catDef.maxTokens : 7000,
     topArticlesHint,
+    imageGroups: resolveWechatImageGroups(category, accountConfig, workConfig, workName),
   };
 }
 
@@ -95,6 +132,16 @@ function resolveWechatTailImage(accountConfig) {
   if (resolved && fs.existsSync(resolved)) return resolved;
 
   console.warn(`  尾图文件不存在，跳过: ${accountConfig.tail_image}`);
+  return null;
+}
+
+function resolveWechatCoverImage(accountConfig) {
+  if (!accountConfig || !accountConfig.cover_image) return null;
+
+  const resolved = resolveProjectFile(accountConfig.cover_image);
+  if (resolved && fs.existsSync(resolved)) return resolved;
+
+  console.warn(`  封面图文件不存在，跳过: ${accountConfig.cover_image}`);
   return null;
 }
 
@@ -206,6 +253,81 @@ function resolveWechatSyncStateFile() {
 function formatWechatHotArticleTitles(titles) {
   if (!titles || !titles.length) return null;
   return titles.map((title, idx) => `${idx + 1}. ${title}`).join('\n');
+}
+
+function normalizeWechatArticleUrl(value) {
+  const url = String(value || '').trim();
+  return /^https:\/\/mp\.weixin\.qq\.com\/s(?:[/?#]|$)/i.test(url) ? url : null;
+}
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function normalizePastRecommendations(recommendations, limit = 10) {
+  const numericLimit = Number(limit);
+  const max = Number.isFinite(numericLimit) ? Math.max(0, Math.floor(numericLimit)) : 10;
+  if (!max) return [];
+  const seenUrls = new Set();
+  return (Array.isArray(recommendations) ? recommendations : [])
+    .map(item => ({
+      title: String(item?.title || '').trim(),
+      url: normalizeWechatArticleUrl(item?.url),
+    }))
+    .filter(item => item.title && item.url && !seenUrls.has(item.url) && seenUrls.add(item.url))
+    .slice(0, max);
+}
+
+function appendPastRecommendationsMarkdown(markdown, recommendations, limit) {
+  const items = normalizePastRecommendations(recommendations, limit);
+  if (!items.length) return markdown;
+
+  const links = items.map(item => {
+    const title = item.title.replace(/([\[\]])/g, '\\$1');
+    return `[${title}](${item.url})`;
+  });
+  return `${String(markdown || '').trim()}\n\n往期精彩文章推荐👇\n\n${links.join('\n\n')}\n`;
+}
+
+function buildPastRecommendationsHtml(recommendations, limit) {
+  const items = normalizePastRecommendations(recommendations, limit);
+  if (!items.length) return '';
+
+  const paragraphStyle = 'text-align: left; font-size: 17px; font-weight: 400; color: rgba(0,0,0,0.9); line-height: 1.8; margin-bottom: 24px';
+  const links = items.map(item => (
+    `<p style="${paragraphStyle}"><span leaf=""><a class="normal_text_link mp_article_text_link" data-itemshowtype="0" href="${escapeHtml(item.url)}" style="font-size: 17px;" target="_blank">${escapeHtml(item.title)}</a></span></p>`
+  )).join('');
+  return `<p style="${paragraphStyle}"><span leaf="">往期精彩文章推荐👇</span></p>${links}`;
+}
+
+function appendWechatFooterHtml(contentHtml, recommendations, limit, tailHtml = '') {
+  return `${contentHtml}${buildPastRecommendationsHtml(recommendations, limit)}${tailHtml || ''}`;
+}
+
+async function resolveWechatPastRecommendations(api, accountConfig) {
+  const configuredLimit = accountConfig?.past_recommendations_count;
+  const limit = configuredLimit !== undefined && configuredLimit !== null && String(configuredLimit).trim() !== ''
+    ? Math.max(0, Math.floor(Number(configuredLimit)) || 0)
+    : 0;
+  if (!limit) {
+    return { items: [], limit: 0 };
+  }
+
+  try {
+    const recommendationApi = api || new WechatAPI(getAccountCookie(accountConfig));
+    if (!api) await recommendationApi.fetchToken();
+    const recommendations = await recommendationApi.fetchPastRecommendations(limit);
+    console.log(`  往期推荐: 已读取 ${recommendations.length} 篇`);
+    return { items: recommendations, limit };
+  } catch (e) {
+    console.warn(`  往期推荐读取失败（不影响生成）: ${e.message}`);
+    return { items: [], limit };
+  }
 }
 
 async function resolveWechatHotArticlesHint(api, publishConfig, accountConfig) {
@@ -570,10 +692,19 @@ program
   .option('--rounds <n>', '执行轮次（每轮按配置生成一批文章）', '10')
   .option('--random [n]', '随机模式：从所有合集中随机抽取 n 个生成（默认 2），每轮重新抽取')
   .option('--per <count>', '随机模式下每个合集生成的文章数', '1')
+  .option('--category <name>', '指定本次生成类别，覆盖默认分类权重')
   .option('--no-push', '仅生成文章，不推送到草稿箱')
   .option('--auto-cookie', '指定账号未登录时自动打开扫码登录')
   .action(async (work, opts) => {
     const selectedAccountName = opts.account || '';
+    let generationCategories;
+    try {
+      generationCategories = resolveGenerationCategories(opts.category);
+    } catch (e) {
+      console.error(e.message);
+      process.exitCode = 1;
+      return;
+    }
     try {
       if (opts.autoCookie && selectedAccountName && opts.push !== false) {
         await ensureWechatCookieIfNeeded(selectedAccountName);
@@ -677,6 +808,7 @@ program
     const accountAuthor = resolveWechatAuthor(account, publishConfig.wechat || {});
     const accountWriterId = resolveWechatWriterId(account, publishConfig.wechat || {});
     const accountTailImage = resolveWechatTailImage(account);
+    const accountCoverImage = resolveWechatCoverImage(account);
 
     // 合并模式下校验不超过 8 篇
     const MAX_COMBINE_ARTICLES = 8;
@@ -686,7 +818,10 @@ program
     }
 
     const rounds = parseInt(opts.rounds) || 1;
-    const globalCategoryQueue = buildWeightedCategoryPlan(totalArticles * rounds);
+    const globalCategoryQueue = buildWeightedCategoryPlan(
+      totalArticles * rounds,
+      generationCategories.length ? generationCategories : null
+    );
 
     console.log('='.repeat(60));
     console.log(`  ${prefix}微信公众号 - AI 直接生成`);
@@ -702,6 +837,7 @@ program
     console.log(`  合并: ${wechatCombine ? '多图文合并' : '逐篇独立草稿'}`);
     console.log(`  间隔: ${opts.interval} 秒`);
     console.log(`  推送: ${opts.push !== false ? '保存到草稿箱' : '仅生成不推送'}`);
+    console.log(`  本次类别: ${generationCategories.length ? generationCategories.join('、') : '按默认权重分配'}`);
     console.log('  热文参考: 已关闭');
     console.log(`  全批分类配额: ${summarizeCategoryPlan(globalCategoryQueue)}`);
     console.log('='.repeat(60));
@@ -719,6 +855,9 @@ program
       if (resolved.changed || albumResult.changed) saveConfig(publishConfig);
     }
 
+    const pastRecommendationResult = await resolveWechatPastRecommendations(api, account);
+    const pastRecommendations = pastRecommendationResult.items;
+    const pastRecommendationsLimit = pastRecommendationResult.limit;
     const topArticlesHint = null;
 
     let grandTotalSuccess = 0;
@@ -813,6 +952,13 @@ program
         try {
           // 1. AI 生成文章
           console.log('  AI 写作中...');
+          const articleOptions = buildWechatArticleOptions(
+            t.category,
+            topArticlesHint,
+            account,
+            actualWorkConfig,
+            actualWorkName
+          );
           const { article: content, imageStats } = await generateArticle(
             t.topic,
             null,
@@ -821,7 +967,12 @@ program
             imageDir,
             t.category,
             t.related_works,
-            buildWechatArticleOptions(t.category, topArticlesHint)
+            articleOptions
+          );
+          const articleWithRecommendations = appendPastRecommendationsMarkdown(
+            content,
+            pastRecommendations,
+            pastRecommendationsLimit
           );
           const wordCount = content.replace(/\s/g, '').replace(/[#*\-\[\]()]/g, '').length;
           console.log(`  生成完成: ${wordCount} 字`);
@@ -833,7 +984,7 @@ program
           }
 
           // 归档文章
-          saveArticleArchive(t.topic, content, WX_GENERATED_DIR);
+          saveArticleArchive(t.topic, articleWithRecommendations, WX_GENERATED_DIR);
 
           if (opts.push === false) {
             console.log('  跳过推送（--no-push）');
@@ -842,7 +993,7 @@ program
             continue;
           }
 
-          // 2. 追加尾图
+          // 2. 记录尾图路径（实际 HTML 在往期推荐之后追加）
           let finalMarkdown = content;
           const tailImage = accountTailImage;
           if (tailImage) {
@@ -850,7 +1001,7 @@ program
           }
 
           // 3. 转 HTML
-          let html = mdToHtml(finalMarkdown, 'wechat');
+          let html = mdToHtml(content, 'wechat');
 
           // 4. 封面
           const imagePaths = excludeTailImagePaths(extractImagePaths(finalMarkdown), tailImage);
@@ -858,7 +1009,9 @@ program
           const coverResult = selectCoverImage({
             title: t.topic,
             imageDir,
-            workFilter: actualWorkName,
+            workFilter: articleOptions.imageGroups.length ? undefined : actualWorkName,
+            allowedGroups: articleOptions.imageGroups,
+            fallbackToLibrary: Boolean(getCategory(t.category)?.standalone),
             articleImagePaths: imagePaths,
           });
 
@@ -870,12 +1023,24 @@ program
             }
             const uploaded = await api.uploadImage(coverResult.coverPath);
             coverUrl = uploaded?.url || null;
+          } else if (accountCoverImage) {
+            const uploaded = await api.uploadImage(accountCoverImage);
+            coverUrl = uploaded?.url || null;
+          } else if (getCategory(t.category)?.standalone) {
+            console.warn(`  未找到独立文案封面，请向 images/${articleOptions.imageGroups.join('、') || '女性朋友圈文案'}/ 添加图片或配置 cover_image`);
           }
 
           // 5. 上传正文图片
           console.log('  上传图片...');
           html = await api.processContentImages(html);
           html = html.replace(/<img[^>]+src="(?!https?:\/\/)[^"]*"[^>]*>/gi, () => '');
+          let tailHtml = '';
+          if (tailImage) {
+            tailHtml = mdToHtml(`![尾图](${tailImage})`, 'wechat');
+            tailHtml = await api.processContentImages(tailHtml);
+            tailHtml = tailHtml.replace(/<img[^>]+src="(?!https?:\/\/)[^"]*"[^>]*>/gi, () => '');
+          }
+          html = appendWechatFooterHtml(html, pastRecommendations, pastRecommendationsLimit, tailHtml);
 
           // 6. 收集到待合并列表
           const albumInfo = buildAlbumInfo(actualWorkConfig);
@@ -941,16 +1106,28 @@ program
           const actualTopicConfig = allConfigs[actualTopicWork] || workConfig;
 
           console.log('  AI 写作中...');
+          const retryArticleOptions = buildWechatArticleOptions(
+            topic.category,
+            topArticlesHint,
+            account,
+            actualTopicConfig,
+            actualTopicWork
+          );
           const { article: content, imageStats } = await generateArticle(
             topic.topic, null, actualTopicWork, topic.characters,
             imageDir, topic.category, topic.related_works,
-            buildWechatArticleOptions(topic.category, topArticlesHint)
+            retryArticleOptions
+          );
+          const retryArticleWithRecommendations = appendPastRecommendationsMarkdown(
+            content,
+            pastRecommendations,
+            pastRecommendationsLimit
           );
           const wordCount = content.replace(/\s/g, '').replace(/[#*\-\[\]()]/g, '').length;
           console.log(`  生成完成: ${wordCount} 字`);
           if (imageStats.matched.length) console.log(`  配图: ${imageStats.matched.length} 张匹配`);
 
-          saveArticleArchive(topic.topic, content, WX_GENERATED_DIR);
+          saveArticleArchive(topic.topic, retryArticleWithRecommendations, WX_GENERATED_DIR);
 
           if (opts.push !== false) {
             let finalMarkdown = content;
@@ -958,18 +1135,35 @@ program
             if (tailImage) {
               finalMarkdown += `\n\n![尾图](${tailImage})\n`;
             }
-            let html = mdToHtml(finalMarkdown, 'wechat');
+            let html = mdToHtml(content, 'wechat');
             const imagePaths = excludeTailImagePaths(extractImagePaths(finalMarkdown), tailImage);
             let coverUrl = null;
             const coverResult = selectCoverImage({
-              title: topic.topic, imageDir, workFilter: actualTopicWork, articleImagePaths: imagePaths,
+              title: topic.topic,
+              imageDir,
+              workFilter: retryArticleOptions.imageGroups.length ? undefined : actualTopicWork,
+              allowedGroups: retryArticleOptions.imageGroups,
+              fallbackToLibrary: Boolean(getCategory(topic.category)?.standalone),
+              articleImagePaths: imagePaths,
             });
             if (coverResult.coverPath) {
               const uploaded = await api.uploadImage(coverResult.coverPath);
               coverUrl = uploaded?.url || null;
+            } else if (accountCoverImage) {
+              const uploaded = await api.uploadImage(accountCoverImage);
+              coverUrl = uploaded?.url || null;
+            } else if (getCategory(topic.category)?.standalone) {
+              console.warn(`  未找到独立文案封面，请向 images/${retryArticleOptions.imageGroups.join('、') || '女性朋友圈文案'}/ 添加图片或配置 cover_image`);
             }
             html = await api.processContentImages(html);
             html = html.replace(/<img[^>]+src="(?!https?:\/\/)[^"]*"[^>]*>/gi, () => '');
+            let tailHtml = '';
+            if (tailImage) {
+              tailHtml = mdToHtml(`![尾图](${tailImage})`, 'wechat');
+              tailHtml = await api.processContentImages(tailHtml);
+              tailHtml = tailHtml.replace(/<img[^>]+src="(?!https?:\/\/)[^"]*"[^>]*>/gi, () => '');
+            }
+            html = appendWechatFooterHtml(html, pastRecommendations, pastRecommendationsLimit, tailHtml);
 
             const albumInfo = buildAlbumInfo(actualTopicConfig);
             draftArticles.push({
@@ -1358,4 +1552,12 @@ program
     await cliExtract({ account: opts.account });
   });
 
-program.parse();
+if (require.main === module) {
+  program.parse();
+}
+
+module.exports = {
+  appendPastRecommendationsMarkdown,
+  buildPastRecommendationsHtml,
+  appendWechatFooterHtml,
+};

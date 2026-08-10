@@ -61,6 +61,8 @@ function listImagesByGroup(imageDir) {
  * @param {string}   options.title               文章标题
  * @param {string}   [options.imageDir]          图片素材根目录
  * @param {string}   [options.workFilter]        限定匹配的作品子目录（如"三国演义"）
+ * @param {string[]} [options.allowedGroups]     限定匹配的多个素材子目录
+ * @param {boolean}  [options.fallbackToLibrary] 标题未命中时从限定素材池随机选图
  * @param {string[]} [options.articleImagePaths]  文章正文中的配图路径列表
  * @returns {{ coverPath: string|null, fromLibrary: boolean }}
  */
@@ -69,6 +71,8 @@ function selectCoverImage(options = {}) {
     title = '',
     imageDir,
     workFilter,
+    allowedGroups = [],
+    fallbackToLibrary = false,
     articleImagePaths = [],
   } = options;
 
@@ -101,10 +105,13 @@ function selectCoverImage(options = {}) {
 
     // 构建角色名 → 图片路径映射（按作品过滤）
     const charMap = {};
+    const libraryCandidates = [];
     for (const img of allImgs) {
       const parts = img.fileName.split('/');
       const work = parts.length > 1 ? parts[0] : '';
-      if (workFilter && work && work !== workFilter) continue;
+      if (allowedGroups.length && !allowedGroups.includes(work || '根目录')) continue;
+      if (!allowedGroups.length && workFilter && work && work !== workFilter) continue;
+      libraryCandidates.push(img.filePath);
       const basename = path.basename(img.fileName, path.extname(img.fileName));
       const charName = basename.replace(/\d+$/, '');
       if (charName.length < 2) continue;
@@ -122,6 +129,11 @@ function selectCoverImage(options = {}) {
           return { coverPath: best, fromLibrary: true };
         }
       }
+    }
+
+    if (fallbackToLibrary) {
+      const fallback = pickBestRatio(libraryCandidates);
+      if (fallback) return { coverPath: fallback, fromLibrary: true };
     }
   }
 
