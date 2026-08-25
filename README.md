@@ -78,12 +78,15 @@ images/
 ### 4. 配置发布
 
 字段说明：
-- `works`: 各作品批量生成文章数量（作品名: 篇数）
+- `works`: 各作品常规批量生成文章数量（作品名: 篇数）
 - `platforms`: 发布平台列表（baijiahao / toutiao / wechat）
 - `publish`: `true`=直接发布，`false`=仅保存草稿
 - `interval`: 每篇发布间隔秒数
 - `baijiahao.daily_rounds`: 百家号每天分时发布轮次，和青龙定时次数保持一致
+- `baijiahao.category_weights`: 百家号文章类型权重，只影响百家号选题分配
 - `baijiahao.accounts`: 百家号账号配置，直接在 `cookie` 中填写账号 Cookie
+- `wechat.work_weights`: 公众号已有合集的小说白名单及生成权重，与顶层百家号 `works` 分开维护；随机模式会先按全批文章数计算固定小说配额，再逐轮扣减，未列出的小说不参与公众号生成，设为 `0` 时禁用
+- `wechat.category_weights`: 公众号文章类型权重，只影响公众号选题分配；数值越大分配越多，设为 `0` 时禁用
 - `wechat.accounts`: 微信公众号账号配置
   - `author`: 文章原创作者名
   - `writer_id`: 作者ID

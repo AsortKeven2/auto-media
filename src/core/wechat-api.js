@@ -752,6 +752,7 @@ class WechatAPI {
     const claimSourceType = options.claimSourceType || '4';  // 个人观点，仅供参考
     const claimSource = options.claimSource || '个人观点，仅供参考';
     const albumInfo = options.albumInfo || '{"appmsg_album_infos":[]}';
+    const canReward = options.canReward !== false;
 
     // 处理封面图
     let thumbUrl = '';
@@ -834,8 +835,8 @@ class WechatAPI {
     form.append('original_article_type0', '');
     form.append('ori_white_list0', '{"white_list":[]}');
 
-    // 付费/打赏
-    form.append('can_reward0', '0');
+    // 付费/赞赏
+    form.append('can_reward0', canReward ? '1' : '0');
     form.append('pay_gifts_count0', '0');
     form.append('reward_reply_id0', '');
     form.append('fee0', '0');
@@ -1023,6 +1024,7 @@ class WechatAPI {
       const claimSourceType = opts.claimSourceType || '4';
       const claimSource = opts.claimSource || '个人观点，仅供参考';
       const albumInfo = opts.albumInfo || '{"appmsg_album_infos":[]}';
+      const canReward = opts.canReward !== false;
 
       // 处理封面图
       let thumbUrl = '';
@@ -1082,8 +1084,8 @@ class WechatAPI {
       form.append(`original_article_type${i}`, '');
       form.append(`ori_white_list${i}`, '{"white_list":[]}');
 
-      // 付费/打赏
-      form.append(`can_reward${i}`, '0');
+      // 付费/赞赏
+      form.append(`can_reward${i}`, canReward ? '1' : '0');
       form.append(`pay_gifts_count${i}`, '0');
       form.append(`reward_reply_id${i}`, '');
       form.append(`fee${i}`, '0');

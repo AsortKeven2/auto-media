@@ -9,6 +9,7 @@ const { callLLM } = require('./llm');
 const { listImagesByGroup } = require('./image-library');
 const { getCategory } = require('./categories');
 const { toPortableProjectPath, normalizeMarkdownLocalImagePaths } = require('./local-file-utils');
+const { normalizeImageMarkers, removeImageMarkers, removeEnglishFromArticle } = require('./markdown-utils');
 
 const RANKING_CATEGORIES = new Set(['数字盘点类', '武力排名类']);
 const RANKING_SELF_CORRECTION_REGEX = /不对[，。！？、… ]|重新来|重新整理|咱们重新|哦对了|等等[，。！？、… ]|推翻重来/;
@@ -216,6 +217,7 @@ function buildPrompt(topic, outline, work, imageList, category, opts = {}) {
 - 只引用影视/原著真实情节和对话，不确定的不要写
 - 禁止使用"不难发现""显而易见""综上所述""值得注意的是"等AI套话
 - 禁止使用[1][2]等引用标注
+- 全文只能使用中文、中文标点和数字，禁止出现任何英文字母、英文单词或英文缩写（图片路径除外）
 - 结尾用开放性问题收束，邀请读者讨论`;
 
   // 统一替换字数占位符
@@ -280,6 +282,7 @@ ${writingRequirements}
 ${topArticlesHint}
 ${imageRequirement}
 ${imageDetails}
+- 正文和标题禁止出现任何英文字母、英文单词或英文缩写；例如 VS、AI、OK 等都要改成中文
 - 只输出最终定稿，严禁输出任何思考过程、自我纠正、犹豫、重写（如"不对""哦对了""等等""重新来""重新整理""咱们重新"等）。如果写到一半发现前面有问题，直接从头输出正确版本，不要保留错误版本和修改痕迹
 ${openingRequirement}
 
@@ -295,6 +298,8 @@ ${outputFormat}`;
  * @returns {{ article, matched: [...], missing: [...] }}
  */
 function resolveImageNames(article, imageDir, work, allowedGroups) {
+  // 先把 AI 混用的半角/全角括号统一成标准 Markdown 图片标记。
+  article = normalizeImageMarkers(article);
   const groups = listImagesByGroup(imageDir);
 
   // 收集可用图片：只搜索指定的目录
@@ -384,6 +389,7 @@ function resolveImageNames(article, imageDir, work, allowedGroups) {
  * 因为系统会自动追加尾图，末尾不能有配图
  */
 function stripLastSectionImages(article) {
+  article = normalizeImageMarkers(article);
   const headingRegex = /^## /gm;
   let lastHeadingIndex = -1;
   let match;
@@ -399,8 +405,7 @@ function stripLastSectionImages(article) {
 }
 
 function countArticleTextCharacters(markdown) {
-  return String(markdown || '')
-    .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+  return removeImageMarkers(normalizeImageMarkers(String(markdown || '')))
     .replace(/\s/g, '')
     .replace(/[#*\-\[\]()]/g, '')
     .length;
@@ -539,26 +544,23 @@ async function generateArticle(topic, outline, work, characters, imageDir, categ
 
   article = await enforceArticleWordCount(article, category, opts, maxTokens);
 
+  // 图片目标仍需保留，英文清洗必须在图片解析之后执行。
+  article = normalizeImageMarkers(article);
+
   if (catDef?.allowInlineImages === false) {
-    article = article.replace(/!\[[^\]]*\]\([^)]*\)/g, '');
+    article = removeImageMarkers(article);
   }
 
   let imageStats = { matched: [], missing: [] };
 
   if (imageDir) {
-    // 修正 AI 常见畸形写法：中文括号、全角符号等
-    article = article
-      .replace(/!\[([^\]】]*)】\(/g, '![$1](')   // ![配图】( → ![配图](
-      .replace(/！\[/g, '![')                      // ！[ → ![
-      .replace(/\]\（/g, '](')                     // ]（ → ](
-      .replace(/）/g, ')')                          // ） → ) (仅图片标记附近)
-    ;
     const result = resolveImageNames(article, imageDir, work, allowedGroups);
     article = result.article;
     imageStats = { matched: result.matched, missing: result.missing };
   }
 
   article = stripLastSectionImages(article);
+  article = removeEnglishFromArticle(article);
 
   return { article, imageStats };
 }
@@ -574,7 +576,9 @@ async function generateArticle(topic, outline, work, characters, imageDir, categ
 async function insertImages(markdown, imageDir, work, relatedWorks) {
   const allowedGroups = relatedWorks && relatedWorks.length > 0 ? relatedWorks : (work ? [work] : []);
   const imageList = buildImageList(imageDir, work, allowedGroups);
-  if (!imageList) return { article: markdown, imageStats: { matched: [], missing: [] } };
+  if (!imageList) {
+    return { article: removeEnglishFromArticle(markdown), imageStats: { matched: [], missing: [] } };
+  }
 
   const prompt = `以下是一篇已写好的文章，请为它插入配图。
 
@@ -588,6 +592,7 @@ ${imageList}
 - 严禁使用场景描述（如"白衣渡江""水淹七军"），找不到匹配角色宁可不插图
 - 最后一个章节不插图
 - 配图标记必须单独成段，前后各空一行，不要和文字段落放在一起
+- 正文和标题禁止出现任何英文字母、英文单词或英文缩写；例如 VS、AI、OK 等都要改成中文
 - 直接输出完整文章，不要加任何说明
 
 原文：
@@ -596,20 +601,15 @@ ${markdown}`;
   const result = await callLLM(prompt, { maxTokens: 6000 });
   if (!result) {
     console.error('  AI 配图失败，使用原文');
-    return { article: markdown, imageStats: { matched: [], missing: [] } };
+    return { article: removeEnglishFromArticle(markdown), imageStats: { matched: [], missing: [] } };
   }
 
   let article = result;
 
-  // 修正 AI 常见畸形写法
-  article = article
-    .replace(/!\[([^\]】]*)】\(/g, '![$1](')
-    .replace(/！\[/g, '![')
-    .replace(/\]\（/g, '](')
-    .replace(/）/g, ')');
+  article = normalizeImageMarkers(article);
 
   const resolved = resolveImageNames(article, imageDir, work, allowedGroups);
-  article = stripLastSectionImages(resolved.article);
+  article = removeEnglishFromArticle(stripLastSectionImages(resolved.article));
 
   return { article, imageStats: { matched: resolved.matched, missing: resolved.missing } };
 }
@@ -619,4 +619,7 @@ module.exports = {
   insertImages,
   getAcceptedWordCountMax,
   detectWorksFromTitle,
+  resolveImageNames,
+  normalizeImageMarkers,
+  removeEnglishFromArticle,
 };

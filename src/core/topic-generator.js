@@ -13,32 +13,39 @@ const ARTICLES_DIR = path.join(__dirname, '../..', 'archive', 'baijiahao');
 const { loadConfig } = require('./config');
 
 const FEATURED_TITLE_PLATFORMS = new Set(['wechat', 'baijiahao']);
-const FEATURED_CATEGORY_WEIGHTS = [
-  { name: '数字盘点类', weight: 3 },
-  { name: '武力排名类', weight: 3 },
-  { name: '实力判定类', weight: 2 },
-  { name: '原著考据类', weight: 2 },
-  { name: '剧情假设类', weight: 2 },
-  { name: '冷门翻案类', weight: 2 },
-  { name: '结局命运类', weight: 2 },
-  { name: '细节深挖类', weight: 1 },
-  { name: '反差揭秘类', weight: 1 },
-  { name: '关系博弈类', weight: 1 },
-  { name: '假设对比类', weight: 1 },
-  { name: '跨书人物对战类', weight: 1 },
-  { name: '势力对战类', weight: 1 },
-  { name: '名场面复盘类', weight: 1 },
-  { name: '权谋布局类', weight: 1 },
-  { name: '设定纠偏类', weight: 1 },
-  { name: '续书衍生类', weight: 1 },
-  { name: '物件线索类', weight: 1 },
-  { name: '阵营群像类', weight: 1 },
-  { name: '疑问解读类', weight: 1 },
-];
-const FEATURED_NORMAL_CATEGORIES = FEATURED_CATEGORY_WEIGHTS.map(item => item.name);
-const FEATURED_WEIGHTED_CATEGORY_POOL = FEATURED_CATEGORY_WEIGHTS.flatMap(item =>
-  Array.from({ length: item.weight }, () => item.name)
-);
+
+function normalizeCategoryWeight(name, value) {
+  const weight = Number(value);
+  if (!Number.isFinite(weight) || weight < 0) {
+    throw new Error(`文章分类“${name}”的权重无效，请设置大于等于 0 的数字`);
+  }
+  return weight;
+}
+
+function getConfiguredCategoryWeights(platform = 'wechat') {
+  const config = loadConfig();
+  const platformConfig = config[platform];
+  const configured = platformConfig && platformConfig.category_weights;
+  if (!configured || typeof configured !== 'object' || Array.isArray(configured)) {
+    throw new Error(`缺少文章分类权重配置，请在 config.json 中设置 ${platform}.category_weights`);
+  }
+
+  const entries = Object.entries(configured);
+  const invalidNames = entries
+    .map(([name]) => name)
+    .filter(name => {
+      const category = CATEGORIES[name];
+      return !category || name === '热文风格' || name === '人物弧光类' || category.standalone;
+    });
+  if (invalidNames.length) {
+    throw new Error(`category_weights 中存在不支持的小说分类：${invalidNames.join('、')}`);
+  }
+
+  return entries.map(([name, weight]) => ({
+    name,
+    weight: normalizeCategoryWeight(name, weight),
+  }));
+}
 
 function usesFeaturedTitleLogic(platform) {
   return FEATURED_TITLE_PLATFORMS.has(platform);
@@ -58,7 +65,7 @@ function shuffleArray(items) {
   return arr;
 }
 
-function buildWeightedCategoryPlan(totalCount, allowedCategories = null) {
+function buildWeightedCategoryPlan(totalCount, allowedCategories = null, platform = 'wechat') {
   const count = Math.max(0, Math.floor(Number(totalCount) || 0));
   if (!count) return [];
 
@@ -66,12 +73,17 @@ function buildWeightedCategoryPlan(totalCount, allowedCategories = null) {
     ? [...new Set(allowedCategories.filter(name => Boolean(CATEGORIES[name])))]
     : null;
   const selectedNames = normalizedNames && normalizedNames.length ? normalizedNames : null;
+  const configuredWeights = getConfiguredCategoryWeights(platform);
   const sourceWeights = selectedNames
     ? selectedNames.map(name => {
-      const configured = FEATURED_CATEGORY_WEIGHTS.find(item => item.name === name);
-      return configured || { name, weight: 1 };
+      const configured = configuredWeights.find(item => item.name === name);
+      // 显式指定类别时，即使配置权重为 0 也必须保留该类别。
+      return { name, weight: configured && configured.weight > 0 ? configured.weight : 1 };
     })
-    : FEATURED_CATEGORY_WEIGHTS;
+    : configuredWeights.filter(item => item.weight > 0);
+  if (!sourceWeights.length) {
+    throw new Error(`没有启用的文章分类，请在 config.json 的 ${platform}.category_weights 中设置大于 0 的权重`);
+  }
   const totalWeight = sourceWeights.reduce((sum, item) => sum + item.weight, 0);
   const weighted = sourceWeights.map(item => {
     const exact = (count * item.weight) / totalWeight;
@@ -105,9 +117,11 @@ function buildWeightedCategoryPlan(totalCount, allowedCategories = null) {
 }
 
 function getNormalCategories(platform) {
-  return usesFeaturedTitleLogic(platform)
-    ? FEATURED_WEIGHTED_CATEGORY_POOL
-    : Object.entries(CATEGORIES)
+  if (usesFeaturedTitleLogic(platform)) {
+    const configuredWeights = getConfiguredCategoryWeights(platform).filter(item => item.weight > 0);
+    return configuredWeights.flatMap(item => Array.from({ length: item.weight }, () => item.name));
+  }
+  return Object.entries(CATEGORIES)
       .filter(([name, cat]) => (
         name !== '热文风格'
         && !cat.featuredTitleOnly
@@ -119,10 +133,12 @@ function getNormalCategories(platform) {
 function buildCategoryPromptSectionForPlatform(platform) {
   if (!usesFeaturedTitleLogic(platform)) return buildCategoryPromptSection(platform);
 
-  return FEATURED_NORMAL_CATEGORIES.map(name => {
+  return getConfiguredCategoryWeights(platform)
+    .filter(item => item.weight > 0)
+    .map(({ name }) => {
     const cat = CATEGORIES[name];
     return `【${name}】${cat.subtitle}\n选题风格：${cat.topicStyle}`;
-  }).join('\n\n');
+    }).join('\n\n');
 }
 
 /**
@@ -269,6 +285,9 @@ async function generateTopics(count = 10, workFilter = null, platform = 'baijiah
     assignedCategories = normalizedOverrides.slice(0, normalCount);
   } else {
     const categoryNames = getNormalCategories(platform);
+    if (normalCount > 0 && !categoryNames.length) {
+      throw new Error(`没有启用的文章分类，请在 config.json 的 ${platform}.category_weights 中设置大于 0 的权重`);
+    }
     let shuffled = shuffleArray(categoryNames);
     for (let i = 0; i < normalCount; i++) {
       if (!shuffled.length) shuffled = shuffleArray(categoryNames);
@@ -593,4 +612,10 @@ function listWorks() {
   }
 }
 
-module.exports = { generateTopics, listWorks, buildWeightedCategoryPlan, isLowValueReversalTitle };
+module.exports = {
+  generateTopics,
+  listWorks,
+  buildWeightedCategoryPlan,
+  getConfiguredCategoryWeights,
+  isLowValueReversalTitle,
+};

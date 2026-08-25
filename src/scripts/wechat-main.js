@@ -21,6 +21,11 @@ const { loadPlatformAccounts, filterAccounts, getAccountCookie } = require('../c
 const { loadConfig, saveConfig } = require('../core/config');
 const { resolveProjectFile } = require('../core/local-file-utils');
 const {
+  normalizeWorkWeight,
+  buildWeightedWorkQuota,
+  takeWeightedWorkRound,
+} = require('../core/work-allocation');
+const {
   ensureWechatAccountDefaults,
   ensureWechatAlbumsForAccount,
   resolveWechatApiForAccount,
@@ -60,6 +65,13 @@ function summarizeCategoryPlan(plan) {
   }
   return [...counts.entries()]
     .map(([name, count]) => `${name} ${count}篇`)
+    .join('、');
+}
+
+function summarizeWorkQuota(allocations, countKey = 'quota', multiplier = 1) {
+  return allocations
+    .filter(item => item[countKey] > 0)
+    .map(item => `${item.name} ${item[countKey] * multiplier}篇`)
     .join('、');
 }
 
@@ -690,7 +702,7 @@ program
   .option('-a, --account <name>', '指定账号名称，不传则处理所有账号')
   .option('--interval <seconds>', '每篇文章之间的间隔秒数', '15')
   .option('--rounds <n>', '执行轮次（每轮按配置生成一批文章）', '10')
-  .option('--random [n]', '随机模式：从所有合集中随机抽取 n 个生成（默认 2），每轮重新抽取')
+  .option('--random [n]', '随机模式：按全批权重份额逐轮抽取 n 个合集生成（默认 2）')
   .option('--per <count>', '随机模式下每个合集生成的文章数', '1')
   .option('--category <name>', '指定本次生成类别，覆盖默认分类权重')
   .option('--no-push', '仅生成文章，不推送到草稿箱')
@@ -738,15 +750,15 @@ program
     const interval = parseInt(opts.interval) * 1000;
 
     // 确定要生成的作品列表
-    // 随机模式：从所有合集中随机抽取若干个，每轮重新抽取
+    // 随机模式：按全批权重份额抽取若干个合集，每轮消费对应份额
     const isRandom = opts.random !== undefined;
     const randomCount = isRandom ? (opts.random === true ? 2 : parseInt(opts.random, 10)) : 0;
     const perWork = Math.max(1, parseInt(opts.per, 10) || 1);
 
     let fixedWorks = null;      // 非随机模式：一次性确定的作品列表
-    let selectRandomWorks = null; // 随机模式：每轮调用以重新抽取
     let randomPickCount = 0;    // 随机模式：实际抽取的合集数（已按池子大小收窄）
     let randomPoolNames = [];   // 随机模式：合集池名称（用于打印）
+    let randomPool = [];
 
     if (isRandom) {
       if (work) {
@@ -757,26 +769,29 @@ program
         console.error(`${prefix}--random 的数量无效: ${opts.random}`);
         continue;
       }
-      const pool = Object.entries(allConfigs).map(([name, config]) => ({ name, config }));
-      if (!pool.length) {
-        console.error(`${prefix}没有可用的合集配置`);
+      // 公众号随机模式使用独立权重；未配置时保持旧逻辑，所有合集权重均为 1。
+      const configuredWorkWeights = publishConfig.wechat?.work_weights || {};
+      const hasConfiguredWorkWeights = Object.keys(configuredWorkWeights).length > 0;
+      randomPool = Object.entries(allConfigs)
+        .filter(([name]) => (
+          !hasConfiguredWorkWeights
+          || Object.prototype.hasOwnProperty.call(configuredWorkWeights, name)
+        ))
+        .map(([name, config]) => ({
+          name,
+          config,
+          weight: normalizeWorkWeight(configuredWorkWeights[name]),
+        }))
+        .filter(item => item.weight > 0);
+      if (!randomPool.length) {
+        console.error(`${prefix}没有权重大于 0 的可用合集配置`);
         continue;
       }
-      randomPoolNames = pool.map(p => p.name);
-      randomPickCount = Math.min(randomCount, pool.length);
+      randomPoolNames = randomPool.map(p => p.name);
+      randomPickCount = Math.min(randomCount, randomPool.length);
       if (randomPickCount < randomCount) {
-        console.log(`${prefix}配置的合集只有 ${pool.length} 个，将随机抽取全部 ${randomPickCount} 个`);
+        console.log(`${prefix}配置的合集只有 ${randomPool.length} 个，将随机抽取全部 ${randomPickCount} 个`);
       }
-      // Fisher-Yates 洗牌后取前 N 个，保证各合集被抽中的概率均匀
-      selectRandomWorks = () => {
-        const arr = [...pool];
-        for (let i = arr.length - 1; i > 0; i--) {
-          const j = Math.floor(Math.random() * (i + 1));
-          [arr[i], arr[j]] = [arr[j], arr[i]];
-        }
-        return arr.slice(0, randomPickCount)
-          .map(({ name, config }) => ({ name, config, count: perWork }));
-      };
     } else if (work) {
       const config = allConfigs[work];
       if (!config) {
@@ -817,7 +832,10 @@ program
       continue;
     }
 
-    const rounds = parseInt(opts.rounds) || 1;
+    const rounds = Math.max(1, parseInt(opts.rounds, 10) || 1);
+    const randomWorkQuota = isRandom
+      ? buildWeightedWorkQuota(randomPool, randomPickCount * rounds, rounds)
+      : [];
     const globalCategoryQueue = buildWeightedCategoryPlan(
       totalArticles * rounds,
       generationCategories.length ? generationCategories : null
@@ -827,8 +845,10 @@ program
     console.log(`  ${prefix}微信公众号 - AI 直接生成`);
     console.log('='.repeat(60));
     if (isRandom) {
-      console.log(`  随机抽取: ${randomPickCount} 个合集 × ${perWork} 篇（每轮重新抽取）`);
+      console.log(`  随机抽取: ${randomPickCount} 个合集 × ${perWork} 篇（按全批份额逐轮扣减）`);
       console.log(`  合集池(${randomPoolNames.length}): ${randomPoolNames.join('、')}`);
+      console.log(`  小说权重: ${randomPool.map(item => `${item.name} ${item.weight}`).join('、')}`);
+      console.log(`  全批小说配额: ${summarizeWorkQuota(randomWorkQuota, 'quota', perWork)}`);
     } else {
       fixedWorks.forEach(w => console.log(`  ${w.name}: ${w.count} 篇`));
     }
@@ -868,11 +888,19 @@ program
       console.log(`\n${'▶'.repeat(3)} 第 ${round + 1}/${rounds} 轮`);
     }
 
-    // 本轮要生成的作品：随机模式每轮重新抽取，否则使用固定列表
-    const worksToGenerate = isRandom ? selectRandomWorks() : fixedWorks;
-    const availableWorkNames = Object.keys(allConfigs).filter(name => allConfigs[name]);
+    // 本轮要生成的作品：随机模式从全批剩余份额中抽取，否则使用固定列表
+    const worksToGenerate = isRandom
+      ? takeWeightedWorkRound(randomWorkQuota, randomPickCount, rounds - round)
+        .map(({ name, config }) => ({ name, config, count: perWork }))
+      : fixedWorks;
+    const availableWorkNames = isRandom
+      ? randomPoolNames
+      : Object.keys(allConfigs).filter(name => allConfigs[name]);
     if (isRandom) {
-      console.log(`  本轮随机合集: ${worksToGenerate.map(w => w.name).join('、')}`);
+      console.log(`  本轮抽取合集: ${worksToGenerate.map(w => w.name).join('、')}`);
+      if (rounds > 1) {
+        console.log(`  剩余小说配额: ${summarizeWorkQuota(randomWorkQuota, 'remaining', perWork) || '无'}`);
+      }
     }
 
     let globalIdx = 0;

@@ -81,6 +81,10 @@ function summarizeCategoryPlan(plan) {
     .join('、');
 }
 
+function buildBaijiahaoCategoryPlan(totalCount) {
+  return buildWeightedCategoryPlan(totalCount, null, 'baijiahao');
+}
+
 const program = new Command();
 program.name('bjh').description('百家号/头条号内容生产 + 自动发布工具').version('1.0.0');
 
@@ -388,7 +392,7 @@ program
       const { record, recordPath, created, deletedOldRecords } = loadOrCreateDailyRecord(publishConfig.works, {
         recordDir: opts.recordDir,
       });
-      const categoryQuota = ensureDailyCategoryQuota(recordPath, record, buildWeightedCategoryPlan);
+      const categoryQuota = ensureDailyCategoryQuota(recordPath, record, buildBaijiahaoCategoryPlan);
       const plan = getDailyBatchPlan(record, rounds);
       dailyRecordContext = { record, recordPath, rounds, plan, categoryQuota };
 
@@ -425,7 +429,7 @@ program
       console.log(`  分时发布: 每天 ${dailyRecordContext.rounds} 轮，基础每轮 ${dailyRecordContext.plan.baseBatchSize} 篇，优先选择剩余量最多的作品`);
       console.log(`  本轮分类配额: ${summarizeCategoryPlan(peekDailyCategoryPlan(dailyRecordContext.record, totalArticles))}`);
     }
-    const batchCategoryQueue = dailyRecordContext ? null : buildWeightedCategoryPlan(totalArticles);
+    const batchCategoryQueue = dailyRecordContext ? null : buildBaijiahaoCategoryPlan(totalArticles);
     if (!dailyRecordContext) {
       console.log(`  全批分类配额: ${summarizeCategoryPlan(batchCategoryQueue)}`);
     }
