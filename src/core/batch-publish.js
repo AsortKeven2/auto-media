@@ -12,7 +12,7 @@ const { ToutiaoAPI } = require('./toutiao-api');
 const { WechatAPI } = require('./wechat-api');
 const { selectCoverImage } = require('./image-library');
 const { resolveProjectFile } = require('./local-file-utils');
-const { normalizeImageMarkers, replaceImageMarkers } = require('./markdown-utils');
+const { normalizeImageMarkers, normalizeMarkdownParagraphs, replaceImageMarkers } = require('./markdown-utils');
 const config = require('./config');
 
 const DEFAULT_IMAGE_DIR = config.imageDir();
@@ -22,7 +22,7 @@ const DEFAULT_TAIL_IMAGE = config.tailImage();
  * Markdown 转 HTML（支持多平台）
  */
 function mdToHtml(markdown, platform = 'baijiahao') {
-  markdown = normalizeImageMarkers(markdown);
+  markdown = normalizeMarkdownParagraphs(normalizeImageMarkers(markdown));
   // AI 有时把小标题写成 **粗体** 而非 ## 标题，统一修正
   // 匹配前面是空行（或文件开头）、独占一行的 **...** → ## 标题
   let md = markdown.replace(/(^|\n\n)\*\*([^\n*]+?)\*\*[ \t]*\n/g, (match, before, content) => {

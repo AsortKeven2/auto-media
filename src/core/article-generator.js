@@ -9,10 +9,25 @@ const { callLLM } = require('./llm');
 const { listImagesByGroup } = require('./image-library');
 const { getCategory } = require('./categories');
 const { toPortableProjectPath, normalizeMarkdownLocalImagePaths } = require('./local-file-utils');
-const { normalizeImageMarkers, removeImageMarkers, removeEnglishFromArticle } = require('./markdown-utils');
+const {
+  normalizeImageMarkers,
+  normalizeMarkdownParagraphs,
+  removeImageMarkers,
+  removeEnglishFromArticle,
+} = require('./markdown-utils');
 
 const RANKING_CATEGORIES = new Set(['数字盘点类', '武力排名类']);
-const RANKING_SELF_CORRECTION_REGEX = /不对[，。！？、… ]|重新来|重新整理|咱们重新|哦对了|等等[，。！？、… ]|推翻重来/;
+const ARTICLE_PROCESS_LEAK_REGEX = /哦\s*[，,、]?\s*不对(?:[，,。！？!?：:\s]|$)|(?:^|[\n。！？!?])\s*不对(?:[，,。！？!?：:]|$)|哦\s*对了|重新来|重新整理|咱们重新|推翻重来|可用配图|配图列表|图片列表|素材列表|素材库|上面的配图|不在[^。！？!?\n]{0,24}(?:配图|图片)/;
+const CROSS_WORK_CATEGORIES = new Set(['跨书人物对战类', '势力对战类']);
+
+function validateArticleOutput(article) {
+  const text = String(article || '');
+  const errors = [];
+  if (ARTICLE_PROCESS_LEAK_REGEX.test(text)) {
+    errors.push('文中出现了自我纠正或配图列表等写作过程文字');
+  }
+  return { valid: errors.length === 0, errors };
+}
 
 /**
  * 从标题中识别涉及的作品
@@ -48,6 +63,20 @@ async function detectWorksFromTitle(title) {
   } catch (e) {
     console.error(`  识别作品失败: ${e.message}`);
     return [];
+  }
+}
+
+async function resolveArticleRelatedWorks(topic, work, category, relatedWorks) {
+  const provided = Array.isArray(relatedWorks)
+    ? [...new Set(relatedWorks.filter(Boolean))]
+    : [];
+  if (!CROSS_WORK_CATEGORIES.has(category) || provided.length >= 2) return provided;
+
+  try {
+    const detected = await detectWorksFromTitle(topic);
+    return [...new Set([...provided, ...detected.filter(Boolean)])];
+  } catch {
+    return provided;
   }
 }
 
@@ -152,9 +181,7 @@ function validateRankingArticle(article) {
   const items = extractRankingItems(normalizedArticle);
   const errors = [];
 
-  if (RANKING_SELF_CORRECTION_REGEX.test(normalizedArticle)) {
-    errors.push('文中出现了“不对 / 哦对了 / 重新来”等自我纠正痕迹');
-  }
+  errors.push(...validateArticleOutput(normalizedArticle).errors);
 
   if (items.length < 3) {
     errors.push(`只识别到 ${items.length} 个规范排名小标题，必须统一使用“## 第X名：角色——点评”`);
@@ -212,6 +239,7 @@ function buildPrompt(topic, outline, work, imageList, category, opts = {}) {
 - 字数 {wordCount}
 - 不要全是书面语、文学风，不要AI腔，像跟读者聊天而不是写论文
 - 段落要有节奏感，大多数段落 150-280 字，过渡设问段可短些，禁止超过 350 字的大段
+- 每个自然段必须单独占一行，段落之间空一行；不要把多个自然段连成一段
 - 围绕标题疑问拆解，多结合影视名场面展开，描述具体场景要有画面感
 - 全文至少 5 处与读者对话：如"你想想""说白了""其实啊""换做是你"
 - 只引用影视/原著真实情节和对话，不确定的不要写
@@ -282,6 +310,7 @@ ${writingRequirements}
 ${topArticlesHint}
 ${imageRequirement}
 ${imageDetails}
+- 正文严禁提及可用配图列表、图片列表、素材库、图片选择过程或任何写作过程
 - 正文和标题禁止出现任何英文字母、英文单词或英文缩写；例如 VS、AI、OK 等都要改成中文
 - 只输出最终定稿，严禁输出任何思考过程、自我纠正、犹豫、重写（如"不对""哦对了""等等""重新来""重新整理""咱们重新"等）。如果写到一半发现前面有问题，直接从头输出正确版本，不要保留错误版本和修改痕迹
 ${openingRequirement}
@@ -447,7 +476,7 @@ async function enforceArticleWordCount(article, category, opts, maxTokens) {
   let lastIssue = '';
 
   for (let attempt = 1; attempt <= 2; attempt++) {
-    const direction = currentCount > acceptedMax ? '压缩' : '补充';
+    const direction = currentCount > acceptedMax ? '压缩' : currentCount < range.min ? '补充' : '重新整理';
     const prompt = `请把下面这篇微信公众号文章${direction}到纯正文 ${targetMin}-${targetMax} 字。
 
 当前纯正文字数：${currentCount} 字
@@ -457,8 +486,10 @@ async function enforceArticleWordCount(article, category, opts, maxTokens) {
 ${preservationRequirement}
 ${consistencyRequirement}
 - 保留必要的人物配图标记，配图名称不得改成场景描述
+- 保持 Markdown 段落格式：每个自然段单独占一行，段落之间空一行
 - 如果是榜单，排名数量、顺序、角色必须与原稿一致，每个角色只能上榜一次
 - 不要加入写作说明、字数说明、自我纠正或修改痕迹
+- 不要提及可用配图、配图列表、素材库或图片选择过程
 - 只输出修改后的完整 Markdown 定稿
 ${lastIssue ? `- 上次调整仍有问题：${lastIssue}` : ''}
 
@@ -472,6 +503,12 @@ ${current}`;
     }
 
     current = rewritten;
+    const outputValidation = validateArticleOutput(current);
+    if (!outputValidation.valid) {
+      lastIssue = outputValidation.errors.join('；');
+      currentCount = countArticleTextCharacters(current);
+      continue;
+    }
     if (isRankingCategory) {
       const validation = validateRankingArticle(current);
       current = validation.article;
@@ -500,22 +537,26 @@ async function generateArticle(topic, outline, work, characters, imageDir, categ
   const maxTokens = opts.maxTokens || (catDef ? catDef.maxTokens : 10000);
 
   // 账号可为独立内容类别指定专属素材目录；否则继续按关联作品取图。
-  const allowedGroups = Array.isArray(opts.imageGroups)
-    ? opts.imageGroups
-    : (relatedWorks && relatedWorks.length > 0 ? relatedWorks : (work ? [work] : []));
+  const detectedRelatedWorks = await resolveArticleRelatedWorks(topic, work, category, relatedWorks);
+  const effectiveRelatedWorks = detectedRelatedWorks.length ? detectedRelatedWorks : (work ? [work] : []);
+  const explicitImageGroups = Array.isArray(opts.imageGroups) ? opts.imageGroups : null;
+  const allowedGroups = explicitImageGroups
+    && (!CROSS_WORK_CATEGORIES.has(category) || explicitImageGroups.length >= 2)
+    ? explicitImageGroups
+    : effectiveRelatedWorks;
   const imageList = imageDir && catDef?.allowInlineImages !== false
     ? buildImageList(imageDir, work, allowedGroups)
     : '';
   const basePrompt = buildPrompt(topic, outline, work, imageList, category, opts);
   const isRankingCategory = RANKING_CATEGORIES.has(category);
-  const maxAttempts = isRankingCategory ? 3 : 1;
+  const maxAttempts = isRankingCategory ? 3 : 2;
 
   let article = '';
   let lastValidationErrors = [];
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const retryFeedback = lastValidationErrors.length
-      ? `\n\n【上次输出不合格，必须从头重写】\n${lastValidationErrors.map(msg => `- ${msg}`).join('\n')}\n- 名次只能出现一次，角色只能出现一次，严禁重复排名、跳排名、临时改排名\n- 所有排名项都必须写成规范小标题：## 第X名：角色——一句话点评\n- 不要沿用上一版的问题结构，直接输出修正后的完整定稿`
+      ? `\n\n【上次输出不合格，必须从头重写】\n${lastValidationErrors.map(msg => `- ${msg}`).join('\n')}\n- 只输出文章正文和 Markdown 标题，不要输出思考过程、配图列表、素材选择说明或自我纠正文字${isRankingCategory ? '\n- 名次只能出现一次，角色只能出现一次，严禁重复排名、跳排名、临时改排名\n- 所有排名项都必须写成规范小标题：## 第X名：角色——一句话点评' : ''}\n- 直接输出修正后的完整定稿`
       : '';
 
     article = await callLLM(basePrompt + retryFeedback, { maxTokens });
@@ -524,7 +565,16 @@ async function generateArticle(topic, outline, work, characters, imageDir, categ
       throw new Error('文章生成失败，请检查 config.json 的 doubao_api_key');
     }
 
-    if (!isRankingCategory) break;
+    if (!isRankingCategory) {
+      const validation = validateArticleOutput(article);
+      if (validation.valid) break;
+      lastValidationErrors = validation.errors;
+      if (attempt < maxAttempts) {
+        console.warn(`  ⚠ 文章输出包含过程性文字，第${attempt}次重试：${validation.errors.join('；')}`);
+        continue;
+      }
+      throw new Error(`文章输出校验失败：${validation.errors.join('；')}`);
+    }
 
     const validation = validateRankingArticle(article);
     article = validation.article;
@@ -560,7 +610,11 @@ async function generateArticle(topic, outline, work, characters, imageDir, categ
   }
 
   article = stripLastSectionImages(article);
-  article = removeEnglishFromArticle(article);
+  article = normalizeMarkdownParagraphs(removeEnglishFromArticle(article));
+  const finalValidation = validateArticleOutput(article);
+  if (!finalValidation.valid) {
+    throw new Error(`文章输出校验失败：${finalValidation.errors.join('；')}`);
+  }
 
   return { article, imageStats };
 }
@@ -577,7 +631,7 @@ async function insertImages(markdown, imageDir, work, relatedWorks) {
   const allowedGroups = relatedWorks && relatedWorks.length > 0 ? relatedWorks : (work ? [work] : []);
   const imageList = buildImageList(imageDir, work, allowedGroups);
   if (!imageList) {
-    return { article: removeEnglishFromArticle(markdown), imageStats: { matched: [], missing: [] } };
+    return { article: normalizeMarkdownParagraphs(removeEnglishFromArticle(markdown)), imageStats: { matched: [], missing: [] } };
   }
 
   const prompt = `以下是一篇已写好的文章，请为它插入配图。
@@ -592,6 +646,7 @@ ${imageList}
 - 严禁使用场景描述（如"白衣渡江""水淹七军"），找不到匹配角色宁可不插图
 - 最后一个章节不插图
 - 配图标记必须单独成段，前后各空一行，不要和文字段落放在一起
+- 正文严禁提及可用配图列表、图片列表、素材库、图片选择过程或任何写作过程
 - 正文和标题禁止出现任何英文字母、英文单词或英文缩写；例如 VS、AI、OK 等都要改成中文
 - 直接输出完整文章，不要加任何说明
 
@@ -606,10 +661,16 @@ ${markdown}`;
 
   let article = result;
 
+  const outputValidation = validateArticleOutput(article);
+  if (!outputValidation.valid) {
+    console.warn(`  AI 配图结果包含过程性文字，使用原文：${outputValidation.errors.join('；')}`);
+    return { article: normalizeMarkdownParagraphs(removeEnglishFromArticle(markdown)), imageStats: { matched: [], missing: [] } };
+  }
+
   article = normalizeImageMarkers(article);
 
   const resolved = resolveImageNames(article, imageDir, work, allowedGroups);
-  article = removeEnglishFromArticle(stripLastSectionImages(resolved.article));
+  article = normalizeMarkdownParagraphs(removeEnglishFromArticle(stripLastSectionImages(resolved.article)));
 
   return { article, imageStats: { matched: resolved.matched, missing: resolved.missing } };
 }
@@ -621,5 +682,7 @@ module.exports = {
   detectWorksFromTitle,
   resolveImageNames,
   normalizeImageMarkers,
+  resolveArticleRelatedWorks,
+  validateArticleOutput,
   removeEnglishFromArticle,
 };

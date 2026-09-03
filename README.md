@@ -90,7 +90,7 @@ images/
 - `wechat.accounts`: 微信公众号账号配置
   - `author`: 文章原创作者名
   - `writer_id`: 作者ID
-  - `combine`: `true`=多篇文章合并为一个多图文草稿，`false`=逐篇保存独立草稿（微信最多合并 8 篇）
+  - `combine`: 普通生成/同步模式下，`true`=多篇文章合并为一个多图文草稿，`false`=逐篇保存独立草稿；随机生成模式固定每 2 篇一个草稿
   - `image_dirs`: 账号级图片素材目录，例如 `["女性朋友圈文案"]`，优先于作品级 `image_dirs`
   - `cover_image`: 素材池没有可用封面时使用的账号级兜底封面
   - `past_recommendations_count`: 该账号生成文章尾部的“往期精彩文章推荐”数量；按已群发文章倒序读取，历史不足时使用实际可用数量，未配置或设为 `0` 时关闭
@@ -168,6 +168,9 @@ node src/scripts/wechat-main.js generate 西游记         # 仅生成指定作�
 node src/scripts/wechat-main.js generate --no-push     # 仅生成不推送
 node src/scripts/wechat-main.js generate --rounds 3    # 执行3轮（批量生成多天文章）
 node src/scripts/wechat-main.js generate --account 叙世阁 --category 女性朋友圈文案类 --no-push  # 现有账号临时生成朋友圈文案
+
+# 随机模式默认20轮，每轮2篇，共40篇；每2篇合并为一个多图文草稿（共20个草稿）
+node src/scripts/wechat-main.js generate --random 2 --account 叙世阁
 
 # 热文排行（公众号）
 node src/scripts/wechat-main.js top                    # 查看阅读量排行

@@ -95,6 +95,56 @@ function removeImageMarkers(markdown) {
   return replaceImageMarkers(markdown, () => '');
 }
 
+function isListLine(line) {
+  return /^\s*(?:[-*+]\s+|\d+[.)、]\s*)/.test(line);
+}
+
+function isBlockLine(line) {
+  return /^\s*(?:#{1,6}\s|!\s*[\[【(（])/.test(line);
+}
+
+/**
+ * 补齐 AI 输出中被省略的 Markdown 段落空行，避免多个自然段被 marked 合并成一个 <p>。
+ * 已有空行和列表结构保持不变；超长单行正文按句末标点拆成适中段落。
+ */
+function normalizeMarkdownParagraphs(markdown) {
+  const lines = String(markdown || '').replace(/\r\n?/g, '\n').split('\n');
+  const expanded = [];
+
+  for (const line of lines) {
+    if (!line.trim() || isBlockLine(line) || isListLine(line) || line.length <= 420) {
+      expanded.push(line);
+      continue;
+    }
+
+    const sentences = line.match(/[^。！？!?；;]+[。！？!?；;]?/g) || [line];
+    let paragraph = '';
+    for (const sentence of sentences) {
+      paragraph += sentence;
+      if (paragraph.length >= 180 || paragraph.length + sentence.length >= 360) {
+        expanded.push(paragraph.trim());
+        paragraph = '';
+      }
+    }
+    if (paragraph.trim()) expanded.push(paragraph.trim());
+  }
+
+  const result = [];
+  for (const line of expanded) {
+    const current = line.trim();
+    if (!current) {
+      if (result.length && result[result.length - 1] !== '') result.push('');
+      continue;
+    }
+
+    const previous = result[result.length - 1];
+    if (previous && !isListLine(previous) && !isListLine(current)) result.push('');
+    result.push(line);
+  }
+
+  return result.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
 /**
  * 移除正文中的英文字母。图片目标保留，否则会破坏本地素材路径或远程地址。
  * 常见的 VS 先转成中文，避免删除后改变标题语义。
@@ -133,5 +183,6 @@ module.exports = {
   replaceImageMarkers,
   normalizeImageMarkers,
   removeImageMarkers,
+  normalizeMarkdownParagraphs,
   removeEnglishFromArticle,
 };

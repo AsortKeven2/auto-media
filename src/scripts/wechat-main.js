@@ -37,6 +37,8 @@ const SYNC_STATE_FILE = path.join(__dirname, '../..', 'wx-sync-state.json');
 const LEGACY_SYNC_STATE_FILE = path.join(__dirname, '../..', '.wx-sync-state.json');
 const WX_SYNC_DIR = path.join(__dirname, '../..', 'archive', 'wechat', 'sync');
 const WX_GENERATED_DIR = path.join(__dirname, '../..', 'archive', 'wechat', 'generated');
+const DEFAULT_RANDOM_ROUNDS = 20;
+const RANDOM_DRAFT_GROUP_SIZE = 2;
 /**
  * 加载所有作品配置 — 从 config.json 读取
  */
@@ -73,6 +75,15 @@ function summarizeWorkQuota(allocations, countKey = 'quota', multiplier = 1) {
     .filter(item => item[countKey] > 0)
     .map(item => `${item.name} ${item[countKey] * multiplier}篇`)
     .join('、');
+}
+
+function chunkItems(items, size) {
+  const groups = [];
+  const groupSize = Math.max(1, Math.floor(Number(size) || 1));
+  for (let i = 0; i < items.length; i += groupSize) {
+    groups.push(items.slice(i, i + groupSize));
+  }
+  return groups;
 }
 
 async function ensureWechatCookieIfNeeded(accountName) {
@@ -697,11 +708,11 @@ async function syncOneWork(api, workName, workConfig, opts, accountConfig) {
  */
 program
   .command('generate')
-  .description('AI 直接生成文章 → 推送到公众号草稿箱（按 wechat 配置的 count）')
+  .description('AI 直接生成文章 → 推送到公众号草稿箱（随机模式默认 40 篇，每 2 篇一个草稿）')
   .argument('[work]', '作品名称，不传则处理所有 count > 0 的作品')
   .option('-a, --account <name>', '指定账号名称，不传则处理所有账号')
   .option('--interval <seconds>', '每篇文章之间的间隔秒数', '15')
-  .option('--rounds <n>', '执行轮次（每轮按配置生成一批文章）', '10')
+  .option('--rounds <n>', '执行轮次（随机模式默认 20 轮，每轮生成 2 篇）')
   .option('--random [n]', '随机模式：按全批权重份额逐轮抽取 n 个合集生成（默认 2）')
   .option('--per <count>', '随机模式下每个合集生成的文章数', '1')
   .option('--category <name>', '指定本次生成类别，覆盖默认分类权重')
@@ -819,7 +830,9 @@ program
       ? randomPickCount * perWork
       : fixedWorks.reduce((sum, w) => sum + w.count, 0);
 
-    const wechatCombine = account.combine === true;
+    // 随机模式固定每两篇组成一个多图文草稿；普通模式继续尊重账号 combine 配置。
+    const wechatCombine = isRandom || account.combine === true;
+    const draftGroupSize = isRandom ? RANDOM_DRAFT_GROUP_SIZE : 0;
     const accountAuthor = resolveWechatAuthor(account, publishConfig.wechat || {});
     const accountWriterId = resolveWechatWriterId(account, publishConfig.wechat || {});
     const accountTailImage = resolveWechatTailImage(account);
@@ -827,12 +840,16 @@ program
 
     // 合并模式下校验不超过 8 篇
     const MAX_COMBINE_ARTICLES = 8;
-    if (wechatCombine && totalArticles > MAX_COMBINE_ARTICLES) {
+    if (wechatCombine && !isRandom && totalArticles > MAX_COMBINE_ARTICLES) {
       console.error(`${prefix}合并模式下最多 ${MAX_COMBINE_ARTICLES} 篇，当前计划 ${totalArticles} 篇，请减少 count 配置`);
       continue;
     }
 
-    const rounds = Math.max(1, parseInt(opts.rounds, 10) || 1);
+    const defaultRounds = isRandom ? DEFAULT_RANDOM_ROUNDS : 10;
+    const requestedRounds = opts.rounds === undefined
+      ? defaultRounds
+      : parseInt(opts.rounds, 10);
+    const rounds = Math.max(1, Number.isFinite(requestedRounds) ? requestedRounds : defaultRounds);
     const randomWorkQuota = isRandom
       ? buildWeightedWorkQuota(randomPool, randomPickCount * rounds, rounds)
       : [];
@@ -849,12 +866,13 @@ program
       console.log(`  合集池(${randomPoolNames.length}): ${randomPoolNames.join('、')}`);
       console.log(`  小说权重: ${randomPool.map(item => `${item.name} ${item.weight}`).join('、')}`);
       console.log(`  全批小说配额: ${summarizeWorkQuota(randomWorkQuota, 'quota', perWork)}`);
+      console.log(`  草稿分组: 每 ${draftGroupSize} 篇一个多图文草稿，共 ${Math.ceil(totalArticles / draftGroupSize) * rounds} 个草稿`);
     } else {
       fixedWorks.forEach(w => console.log(`  ${w.name}: ${w.count} 篇`));
     }
     console.log(`  合计: ${totalArticles} 篇/轮`);
     if (rounds > 1) console.log(`  轮次: ${rounds} 轮（共 ${totalArticles * rounds} 篇）`);
-    console.log(`  合并: ${wechatCombine ? '多图文合并' : '逐篇独立草稿'}`);
+    console.log(`  合并: ${isRandom ? `每 ${draftGroupSize} 篇一个多图文草稿` : (wechatCombine ? '多图文合并' : '逐篇独立草稿')}`);
     console.log(`  间隔: ${opts.interval} 秒`);
     console.log(`  推送: ${opts.push !== false ? '保存到草稿箱' : '仅生成不推送'}`);
     console.log(`  本次类别: ${generationCategories.length ? generationCategories.join('、') : '按默认权重分配'}`);
@@ -907,7 +925,7 @@ program
     let totalSuccess = 0;
     let totalFail = 0;
     const allResults = [];
-    const draftArticles = []; // 收集所有文章，最后合并为一个草稿
+    const draftArticles = []; // 收集本轮文章，按随机模式的两篇一组或普通模式整批保存
 
     // ── 分类配额：启动时已按全批总量生成，这里每轮只消费本轮需要的类别 ──
     const roundCategoryPlan = globalCategoryQueue.splice(0, totalArticles);
@@ -1217,26 +1235,34 @@ program
     // 保存草稿
     if (draftArticles.length > 0 && opts.push !== false) {
       if (wechatCombine) {
-        // 合并为一个多图文草稿
+        const groups = isRandom
+          ? chunkItems(draftArticles, draftGroupSize)
+          : [draftArticles];
         console.log(`\n${'─'.repeat(60)}`);
-        console.log(`  保存多图文草稿（${draftArticles.length} 篇）...`);
+        console.log(`  保存多图文草稿（${groups.length} 个，每组最多 ${isRandom ? draftGroupSize : draftArticles.length} 篇）...`);
         console.log('─'.repeat(60));
 
-        const result = await api.saveMultiDraft(draftArticles);
-        if (result.success) {
-          console.log(`  ✓ 草稿已保存 (ID: ${result.article_id})`);
-          for (const r of allResults) {
-            if (r.success && !r.skipped) {
-              r.article_id = result.article_id;
-              r.draft_url = result.draft_url;
+        for (let groupIndex = 0; groupIndex < groups.length; groupIndex++) {
+          const group = groups[groupIndex];
+          console.log(`  保存第 ${groupIndex + 1}/${groups.length} 个草稿（${group.length} 篇）...`);
+          const result = await api.saveMultiDraft(group);
+          const groupKeys = new Set(group.map(item => `${item.work || ''}\u0000${item.title}`));
+          const groupResults = allResults.filter(item => (
+            item.success
+            && !item.skipped
+            && groupKeys.has(`${item.work || ''}\u0000${item.title}`)
+          ));
+          if (result.success) {
+            console.log(`  ✓ 草稿已保存 (ID: ${result.article_id})`);
+            for (const item of groupResults) {
+              item.article_id = result.article_id;
+              item.draft_url = result.draft_url;
             }
-          }
-        } else {
-          console.error(`  ✗ 草稿保存失败: ${result.message}`);
-          for (const r of allResults) {
-            if (r.success && !r.skipped) {
-              r.success = false;
-              r.message = `草稿合并保存失败: ${result.message}`;
+          } else {
+            console.error(`  ✗ 草稿保存失败: ${result.message}`);
+            for (const item of groupResults) {
+              item.success = false;
+              item.message = `草稿合并保存失败: ${result.message}`;
               totalSuccess--;
               totalFail++;
             }
