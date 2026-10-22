@@ -145,6 +145,180 @@ function normalizeMarkdownParagraphs(markdown) {
   return result.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
+// 武侠百晓通每段两三句、五十五到七十字，几乎不超过一百字
+const PARAGRAPH_SOFT_MAX = 75;
+const PARAGRAPH_HARD_MAX = 100;
+const PARAGRAPH_MIN_TO_BREAK = 45;
+const SENTENCE_PATTERN = /[^。！？!?]+(?:[。！？!?]+[”’」』）)]*)?/g;
+const CJK = '\\u4e00-\\u9fff，。！？；：“”‘’、（）《》…';
+const SPACE_BETWEEN_CJK = new RegExp(`([${CJK}])[ \\t\\u3000]+(?=[${CJK}])`, 'g');
+
+function visibleLength(text) {
+  return String(text || '').replace(/\s/g, '').length;
+}
+
+/** 引号、括号都已经配对，说明停在这里不会把一句引语或括注切成两段 */
+function isBalanced(text) {
+  const count = ch => text.split(ch).length - 1;
+  return count('“') === count('”') && count('（') === count('）') && count('「') === count('」');
+}
+
+function splitParagraphLine(line) {
+  const sentences = line.match(SENTENCE_PATTERN) || [line];
+  const groups = [];
+  let current = '';
+  for (const sentence of sentences) {
+    const next = current + sentence;
+    const tooLong = visibleLength(next) > PARAGRAPH_HARD_MAX
+      || (visibleLength(current) >= PARAGRAPH_MIN_TO_BREAK && visibleLength(next) > PARAGRAPH_SOFT_MAX);
+    if (current && tooLong && isBalanced(current)) {
+      groups.push(current);
+      current = sentence;
+    } else {
+      current = next;
+    }
+  }
+  if (current) groups.push(current);
+  // 切出来的最后一小截太短，并回上一段
+  const last = groups[groups.length - 1];
+  if (groups.length > 1 && visibleLength(last) < 20 && visibleLength(groups[groups.length - 2] + last) <= PARAGRAPH_HARD_MAX) {
+    groups.pop();
+    groups[groups.length - 1] += last;
+  }
+  return groups.map(group => group.trim()).filter(Boolean);
+}
+
+/**
+ * 按武侠百晓通的段落规矩整理正文：超过一百字的段落在句末标点处切开，每段两三句；
+ * 不在引号、括号中间切，标题、配图、列表、“（原文）”段不动；只加换行、去掉中文之间多余的空格，不改字
+ */
+function splitLongParagraphs(markdown) {
+  const lines = String(markdown || '').replace(/\r\n?/g, '\n').split('\n');
+  const output = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || isBlockLine(trimmed) || isListLine(trimmed) || /^>/.test(trimmed) || /^[（(]原文[）)]/.test(trimmed)) {
+      output.push(line);
+      continue;
+    }
+    const cleaned = trimmed.replace(SPACE_BETWEEN_CJK, '$1');
+    if (visibleLength(cleaned) <= PARAGRAPH_HARD_MAX) {
+      output.push(cleaned);
+      continue;
+    }
+    output.push(splitParagraphLine(cleaned).join('\n\n'));
+  }
+  return output.join('\n').replace(/\n{3,}/g, '\n\n');
+}
+
+const IMAGE_ONLY_LINE = /^\s*!\[[^\]]*\]\([^\n]*\)\s*$/;
+
+function isTextParagraphLine(line) {
+  const trimmed = line.trim();
+  return Boolean(trimmed) && !/^#{1,6}\s/.test(trimmed) && !IMAGE_ONLY_LINE.test(trimmed);
+}
+
+/** 统计正文配图数量，尾图不计入 */
+function countInlineImages(markdown) {
+  let count = 0;
+  replaceImageMarkers(markdown, marker => {
+    if (marker.alt !== '尾图') count += 1;
+    return marker.raw;
+  });
+  return count;
+}
+
+/**
+ * 封面图补进正文时的插入位置：有 ## 小标题时放在第一个小标题后；
+ * 没有小标题时放在第二个正文段落之后，避免紧贴在文章标题下面。
+ * @returns {number} 插入位置（字符下标），找不到合适位置返回 -1
+ */
+function findInlineCoverInsertPosition(markdown) {
+  const text = String(markdown || '');
+  const heading = text.match(/^##\s.*$/m);
+  if (heading) return heading.index + heading[0].length;
+
+  let offset = 0;
+  let seen = 0;
+  for (const line of text.split('\n')) {
+    offset += line.length + 1;
+    if (!isTextParagraphLine(line)) continue;
+    seen += 1;
+    if (seen === 2) return Math.min(offset - 1, text.length);
+  }
+  return -1;
+}
+
+/**
+ * 按版式规则整理正文配图：总数封顶、开头和结尾留白、两图之间保持间隔。
+ * 超出上限时在合格的配图里均匀挑选，避免图片全挤在前半篇。
+ * @param {string} markdown 已统一过图片标记的 Markdown
+ * @param {{maxImages?:number, skipHead?:number, skipTail?:number, minGap?:number}} [options]
+ *   skipHead/skipTail 为开头、结尾不放图的正文段落数，minGap 为两图之间至少间隔的正文段落数
+ * @returns {{markdown:string, kept:number, removed:number}}
+ */
+function arrangeInlineImages(markdown, options = {}) {
+  const { maxImages = 5, skipHead = 2, skipTail = 3, minGap = 3 } = options;
+
+  // 夹在正文里的图片标记先拆成独立段落，便于按段落计位置
+  const lines = [];
+  for (const line of normalizeImageMarkers(markdown).split('\n')) {
+    if (IMAGE_ONLY_LINE.test(line) || !line.includes('![')) {
+      lines.push(line);
+      continue;
+    }
+    const markers = [];
+    const textPart = replaceImageMarkers(line, marker => {
+      markers.push(marker.raw);
+      return '';
+    }).trim();
+    if (textPart) lines.push(textPart);
+    markers.forEach(raw => lines.push('', raw, ''));
+  }
+
+  const totalText = lines.filter(isTextParagraphLine).length;
+  const images = [];
+  let textBefore = 0;
+  lines.forEach((line, index) => {
+    if (isTextParagraphLine(line)) {
+      textBefore += 1;
+    } else if (IMAGE_ONLY_LINE.test(line)) {
+      images.push({ index, textBefore, textAfter: totalText - textBefore, ref: line.trim() });
+    }
+  });
+
+  const seenRefs = new Set();
+  let eligible = images.filter(image => {
+    if (image.textBefore < skipHead || image.textAfter < skipTail) return false;
+    if (seenRefs.has(image.ref)) return false;
+    seenRefs.add(image.ref);
+    return true;
+  });
+
+  if (eligible.length > maxImages) {
+    const picked = new Set();
+    for (let i = 0; i < maxImages; i++) {
+      picked.add(Math.round((i * (eligible.length - 1)) / Math.max(1, maxImages - 1)));
+    }
+    eligible = eligible.filter((_, i) => picked.has(i));
+  }
+
+  const keep = new Set();
+  let lastKept = null;
+  for (const image of eligible) {
+    if (lastKept !== null && image.textBefore - lastKept < minGap) continue;
+    keep.add(image.index);
+    lastKept = image.textBefore;
+  }
+
+  const result = lines
+    .filter((line, index) => !IMAGE_ONLY_LINE.test(line) || keep.has(index))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  return { markdown: result, kept: keep.size, removed: images.length - keep.size };
+}
+
 /**
  * 移除正文中的英文字母。图片目标保留，否则会破坏本地素材路径或远程地址。
  * 常见的 VS 先转成中文，避免删除后改变标题语义。
@@ -184,5 +358,9 @@ module.exports = {
   normalizeImageMarkers,
   removeImageMarkers,
   normalizeMarkdownParagraphs,
+  splitLongParagraphs,
   removeEnglishFromArticle,
+  countInlineImages,
+  findInlineCoverInsertPosition,
+  arrangeInlineImages,
 };

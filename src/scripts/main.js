@@ -20,6 +20,7 @@ const { selectCoverImage } = require('../core/image-library');
 const { CATEGORIES } = require('../core/categories');
 const { loadPlatformAccounts, filterAccounts, getAccountCookie } = require('../core/account-config');
 const { loadConfig, saveConfig } = require('../core/config');
+const { createLimiter, createSerialQueue, runWithLogPrefix, resolveConcurrency } = require('../core/concurrency');
 const {
   PUBLISH_RECORD_DIR,
   loadOrCreateDailyRecord,
@@ -30,6 +31,10 @@ const {
   peekDailyCategoryPlan,
   consumeDailyCategoryPlan,
 } = require('../core/daily-publish-record');
+const { useLlmFor } = require('../core/llm');
+
+// 这里生成的是百家号文章，按 config.json 里 baijiahao.llm 选模型（不写默认豆包，NAS 上没有 Claude Code）
+useLlmFor('baijiahao');
 
 // ==================== 缺失图片日志 ====================
 
@@ -366,6 +371,7 @@ program
   .option('--daily-record', '百家号分时发布模式：按 publish_record 记录当天剩余量')
   .option('--rounds <n>', '分时发布模式下当天发布轮次（覆盖 config.json 的 baijiahao.daily_rounds）')
   .option('--record-dir <dir>', '分时发布记录目录', PUBLISH_RECORD_DIR)
+  .option('--concurrency <n>', '同时生成的文章数（默认 5，也可在 config.json 的 baijiahao.concurrency 配置）')
   .action(async (opts) => {
     const publishConfig = loadPublishConfig();
     if (!publishConfig) return;
@@ -374,9 +380,21 @@ program
     const shouldPublish = opts.publish !== undefined ? opts.publish : publishConfig.publish;
     const intervalSec = opts.interval ? parseInt(opts.interval) : publishConfig.interval;
     const platforms = opts.platform ? parsePlatforms(opts.platform) : publishConfig.platforms;
+    const configuredDailyLimit = Math.max(1, parseInt(publishConfig.baijiahao.daily_limit, 10) || 15);
+    const useBaijiahaoDailyLimit = Boolean(
+      opts.push !== false && shouldPublish && platforms.includes('baijiahao')
+    );
+    const useDailyRecord = Boolean(opts.dailyRecord || (
+      opts.push !== false
+      && shouldPublish
+      && platforms.length === 1
+      && platforms[0] === 'baijiahao'
+      && configuredDailyLimit > 0
+    ));
 
     let dailyRecordContext = null;
-    if (opts.dailyRecord) {
+    let baijiahaoDailyLimitContext = null;
+    if (useDailyRecord) {
       if (!(platforms.length === 1 && platforms[0] === 'baijiahao')) {
         console.error('百家号分时发布模式只支持 --platform baijiahao，不会改动微信/头条逻辑');
         return;
@@ -391,6 +409,7 @@ program
       const rounds = Math.max(1, parseInt(roundsSource, 10) || 5);
       const { record, recordPath, created, deletedOldRecords } = loadOrCreateDailyRecord(publishConfig.works, {
         recordDir: opts.recordDir,
+        dailyLimit: configuredDailyLimit,
       });
       const categoryQuota = ensureDailyCategoryQuota(recordPath, record, buildBaijiahaoCategoryPlan);
       const plan = getDailyBatchPlan(record, rounds);
@@ -399,8 +418,20 @@ program
       console.log(`  发布记录: ${recordPath}${created ? '（今日首次创建）' : ''}`);
       deletedOldRecords.forEach(file => console.log(`  已删除旧发布记录: ${file}`));
       console.log(`  今日剩余: ${record.remaining_total}/${record.total} 篇`);
+      console.log(`  百家号每日发布额度: ${configuredDailyLimit} 篇`);
       console.log(`  今日分类配额: ${categoryQuota.created ? '已创建' : '已读取'}，剩余 ${categoryQuota.remaining}/${categoryQuota.total} 篇`);
       console.log(`  今日配置: ${plan.roundsTotal} 轮，基础每轮 ${plan.baseBatchSize} 篇，本轮计划 ${plan.batchSize} 篇${plan.isFinalRound ? '（发送全部剩余）' : ''}`);
+    }
+
+    if (dailyRecordContext) {
+      baijiahaoDailyLimitContext = dailyRecordContext;
+    } else if (useBaijiahaoDailyLimit) {
+      const { record, recordPath } = loadOrCreateDailyRecord(publishConfig.works, {
+        recordDir: opts.recordDir,
+        dailyLimit: configuredDailyLimit,
+      });
+      baijiahaoDailyLimitContext = { record, recordPath };
+      console.log(`  百家号每日发布额度: ${configuredDailyLimit} 篇，今日剩余 ${record.remaining_total}/${record.total} 篇`);
     }
 
     const entries = dailyRecordContext
@@ -475,6 +506,158 @@ program
     const allResults = [];
     let lastPublishTime = 0;
 
+    // 文章生成并发进行，发布排队按间隔逐篇进行，保证发布频率和每日记录不乱
+    const concurrency = resolveConcurrency(opts.concurrency ?? publishConfig.baijiahao?.concurrency, 5);
+    const limitGeneration = createLimiter(concurrency);
+    const publishQueue = createSerialQueue();
+    const articleJobs = [];
+    console.log(`  并发: 同时生成 ${concurrency} 篇，发布按间隔逐篇进行`);
+
+    // 生成文章并落盘；失败时记录结果并返回 null
+    const generateTopicArticle = async (t, work, idx) => {
+      console.log(`\n${'='.repeat(60)}`);
+      console.log(`  [${idx}/${totalArticles}] ${work} — ${t.topic}`);
+      console.log('='.repeat(60));
+
+      // 生成文章（直接从选题生成，跳过大纲）
+      let filePath;
+      try {
+        console.log('  AI 写作中...');
+        const { article: content, imageStats } = await generateArticle(
+          t.topic,
+          null,
+          t.work,
+          t.characters,
+          imageDir,
+          t.category,
+          t.related_works,
+          {
+            platform: 'baijiahao',
+            wordCount: '1500-2000',
+            enforceWordCount: false,
+            maxTokens: 4000,
+            factCheck: false,
+          }
+        );
+        const wordCount = content.replace(/\s/g, '').replace(/[#*\-\[\]()]/g, '').length;
+        console.log(`  生成完成: ${wordCount} 字`);
+
+        if (imageStats.matched.length) {
+          console.log(`  配图: ${imageStats.matched.length} 张匹配`);
+        }
+        if (imageStats.missing.length) {
+          console.log(`  缺失: ${imageStats.missing.join('、')}`);
+          logMissingImages(t.work, t.topic, imageStats.missing);
+        }
+
+        filePath = createArticle(t.topic, content, {
+          type: t.type,
+          category: t.category,
+          work: t.work,
+          main_character: t.main_character,
+          characters: t.characters,
+          status: 'ready',
+          tags: [t.work, t.category, ...t.characters].filter(Boolean),
+          matched_images: imageStats.matched.map(m => m.file),
+          missing_images: imageStats.missing,
+        });
+      } catch (e) {
+        console.error(`  生成失败: ${e.message}`);
+        allResults.push({ work, title: t.topic, success: false });
+        return null;
+      }
+
+      if (opts.push === false) {
+        console.log('  跳过推送（--no-push）');
+        allResults.push({ work, title: path.basename(filePath), success: true, skipped: true });
+        return null;
+      }
+      return { work, filePath };
+    };
+
+    // 推送到各平台（多账号：每个账号都推送）；在发布队列里逐篇执行
+    const publishTopicArticle = async ({ work, filePath }) => {
+      // 间隔等待
+      if (lastPublishTime > 0) {
+        const elapsed = Date.now() - lastPublishTime;
+        if (elapsed < interval) {
+          const wait = interval - elapsed;
+          console.log(`\n  等待 ${Math.ceil(wait / 1000)} 秒后发布...`);
+          await new Promise(r => setTimeout(r, wait));
+        }
+      }
+      lastPublishTime = Date.now();
+
+      let anySuccess = false;
+      const urls = [];
+      for (const p of platforms) {
+        if (p === 'baijiahao' && baijiahaoDailyLimitContext?.record.remaining_total <= 0) {
+          console.log('  百家号今日发布额度已用完，跳过百家号推送');
+          continue;
+        }
+
+        const apiEntries = platformAPIs[p] || [];
+        let baijiahaoArticlePublished = false;
+        for (const { account: pAccount } of apiEntries) {
+          const pName = platformLabel(p);
+          const prefix = pAccount && pAccount.name !== 'default' ? `[${pAccount.name}] ` : '';
+          console.log(`  >>> 推送到${prefix}${pName}...`);
+          try {
+            const cookie = pAccount ? getAccountCookie(pAccount) : undefined;
+            const result = await pushWithImages(filePath, imageDir, {
+              tail: opts.tail,
+              minImages: 7,
+              publish: (p === 'baijiahao' || p === 'wechat') ? shouldPublish : false,
+              platform: p,
+              cookieStr: cookie,
+              _skipAuth: true,
+            });
+            const publishRequired = shouldPublish && (p === 'baijiahao' || p === 'wechat');
+            const pushSucceeded = result && result.success && (!publishRequired || result.published === true);
+            if (pushSucceeded) {
+              anySuccess = true;
+              urls.push(`${prefix}${pName}: ${result.publish_url || result.draft_url}`);
+              if (p === 'baijiahao' && publishRequired) {
+                baijiahaoArticlePublished = true;
+              }
+            } else if (result && result.success && publishRequired) {
+              console.error(`  ${prefix}${pName}发布未成功，不计入本次成功`);
+            }
+          } catch (e) {
+            console.error(`  ${prefix}${pName}推送失败: ${e.message}`);
+          }
+        }
+
+        if (p === 'baijiahao' && baijiahaoArticlePublished && baijiahaoDailyLimitContext && !dailyRecordContext) {
+          const works = baijiahaoDailyLimitContext.record.works;
+          const quotaWork = works[work] > 0
+            ? work
+            : Object.keys(works).find(name => works[name] > 0);
+          if (quotaWork) {
+            decrementDailyRecord(baijiahaoDailyLimitContext.recordPath, baijiahaoDailyLimitContext.record, quotaWork);
+          }
+        }
+      }
+
+      if (anySuccess) {
+        successCount++;
+        updateMeta(filePath, {
+          status: shouldPublish ? 'published' : 'draft_saved',
+          published_at: new Date().toISOString(),
+        });
+
+        if (dailyRecordContext && shouldPublish && opts.push !== false) {
+          const remain = decrementDailyRecord(
+            dailyRecordContext.recordPath,
+            dailyRecordContext.record,
+            work
+          );
+          console.log(`  发布记录已更新: ${work} 剩余 ${remain} 篇，今日总剩余 ${dailyRecordContext.record.remaining_total} 篇`);
+        }
+      }
+      allResults.push({ work, title: path.basename(filePath), success: anySuccess, urls: urls.join(' | ') });
+    };
+
     for (const [work, count] of entries) {
       console.log(`\n${'#'.repeat(60)}`);
       console.log(`  ${work} — 计划 ${count} 篇`);
@@ -487,14 +670,15 @@ program
         console.log(`  分类配额: ${summarizeCategoryPlan(categoryPlan)}`);
       }
 
-      // 为该作品生成选题（不足时重试一次补齐）
-      let topics = await generateTopics(count, work, 'baijiahao', null, null, categoryPlan);
-      if (topics.length < count && topics.length > 0) {
-        console.log(`  选题不足 ${topics.length}/${count}，补充生成中...`);
+      // 为该作品生成选题（不足时重试一次补齐）；选题按作品顺序生成，文章交给并发池
+      let topics = await generateTopics(count, work, 'baijiahao', categoryPlan);
+      // 选题不足时（包括被前提核查全部剔除）最多再补两次；剔除的题留在历史里，不会再生成同一个
+      for (let retry = 1; retry <= 2 && topics.length < count; retry++) {
+        console.log(`  选题不足 ${topics.length}/${count}，第 ${retry} 次补充生成中...`);
         const extraCategoryPlan = dailyRecordContext
           ? peekDailyCategoryPlan(dailyRecordContext.record, count).slice(topics.length)
           : categoryPlan.slice(topics.length);
-        const extra = await generateTopics(count - topics.length, work, 'baijiahao', null, null, extraCategoryPlan);
+        const extra = await generateTopics(count - topics.length, work, 'baijiahao', extraCategoryPlan);
         topics = topics.concat(extra);
       }
       if (!topics.length) {
@@ -510,124 +694,19 @@ program
       console.log(`  生成了 ${topics.length} 个选题`);
       topics.forEach((t, i) => console.log(`    ${i + 1}. [${t.category}] ${t.topic}`));
 
-      for (let i = 0; i < topics.length; i++) {
+      for (const t of topics) {
         globalIdx++;
-        const t = topics[i];
-        console.log(`\n${'='.repeat(60)}`);
-        console.log(`  [${globalIdx}/${totalArticles}] ${work} — ${t.topic}`);
-        console.log('='.repeat(60));
-
-        // 生成文章（直接从选题生成，跳过大纲）
-        let filePath;
-        try {
-          console.log('  AI 写作中...');
-          const { article: content, imageStats } = await generateArticle(
-            t.topic,
-            null,
-            t.work,
-            t.characters,
-            imageDir,
-            t.category,
-            t.related_works,
-            { wordCount: '1500-2000', maxTokens: 4000 }
-          );
-          const wordCount = content.replace(/\s/g, '').replace(/[#*\-\[\]()]/g, '').length;
-          console.log(`  生成完成: ${wordCount} 字`);
-
-          if (imageStats.matched.length) {
-            console.log(`  配图: ${imageStats.matched.length} 张匹配`);
-          }
-          if (imageStats.missing.length) {
-            console.log(`  缺失: ${imageStats.missing.join('、')}`);
-            logMissingImages(t.work, t.topic, imageStats.missing);
-          }
-
-          filePath = createArticle(t.topic, content, {
-            type: t.type,
-            category: t.category,
-            work: t.work,
-            main_character: t.main_character,
-            characters: t.characters,
-            status: 'ready',
-            tags: [t.work, t.category, ...t.characters].filter(Boolean),
-            matched_images: imageStats.matched.map(m => m.file),
-            missing_images: imageStats.missing,
-          });
-        } catch (e) {
-          console.error(`  生成失败: ${e.message}`);
-          allResults.push({ work, title: t.topic, success: false });
-          continue;
-        }
-
-        if (opts.push === false) {
-          console.log('  跳过推送（--no-push）');
-          allResults.push({ work, title: path.basename(filePath), success: true, skipped: true });
-          continue;
-        }
-
-        // 间隔等待
-        if (lastPublishTime > 0) {
-          const elapsed = Date.now() - lastPublishTime;
-          if (elapsed < interval) {
-            const wait = interval - elapsed;
-            console.log(`\n  等待 ${Math.ceil(wait / 1000)} 秒后发布...`);
-            await new Promise(r => setTimeout(r, wait));
-          }
-        }
-        lastPublishTime = Date.now();
-
-        // 推送到各平台（多账号：每个账号都推送）
-        let anySuccess = false;
-        const urls = [];
-        for (const p of platforms) {
-          const apiEntries = platformAPIs[p] || [];
-          for (const { account: pAccount } of apiEntries) {
-            const pName = platformLabel(p);
-            const prefix = pAccount && pAccount.name !== 'default' ? `[${pAccount.name}] ` : '';
-            console.log(`  >>> 推送到${prefix}${pName}...`);
-            try {
-              const cookie = pAccount ? getAccountCookie(pAccount) : undefined;
-              const result = await pushWithImages(filePath, imageDir, {
-                tail: opts.tail,
-                minImages: 7,
-                publish: (p === 'baijiahao' || p === 'wechat') ? shouldPublish : false,
-                platform: p,
-                cookieStr: cookie,
-                _skipAuth: true,
-              });
-              const publishRequired = shouldPublish && (p === 'baijiahao' || p === 'wechat');
-              const pushSucceeded = result && result.success && (!publishRequired || result.published === true);
-              if (pushSucceeded) {
-                anySuccess = true;
-                urls.push(`${prefix}${pName}: ${result.publish_url || result.draft_url}`);
-              } else if (result && result.success && publishRequired) {
-                console.error(`  ${prefix}${pName}发布未成功，不计入本次成功`);
-              }
-            } catch (e) {
-              console.error(`  ${prefix}${pName}推送失败: ${e.message}`);
-            }
-          }
-        }
-
-        if (anySuccess) {
-          successCount++;
-          updateMeta(filePath, {
-            status: shouldPublish ? 'published' : 'draft_saved',
-            published_at: new Date().toISOString(),
-          });
-
-          if (dailyRecordContext && shouldPublish && opts.push !== false) {
-            const remain = decrementDailyRecord(
-              dailyRecordContext.recordPath,
-              dailyRecordContext.record,
-              work
-            );
-            console.log(`  发布记录已更新: ${work} 剩余 ${remain} 篇，今日总剩余 ${dailyRecordContext.record.remaining_total} 篇`);
-          }
-        }
-        allResults.push({ work, title: path.basename(filePath), success: anySuccess, urls: urls.join(' | ') });
+        const idx = globalIdx;
+        const logPrefix = concurrency > 1 ? `[${idx}/${totalArticles}]` : '';
+        articleJobs.push(
+          limitGeneration(() => runWithLogPrefix(logPrefix, () => generateTopicArticle(t, work, idx)))
+            .then(generated => generated && publishQueue(() => runWithLogPrefix(logPrefix, () => publishTopicArticle(generated))))
+            .catch(e => console.error(`  [${idx}/${totalArticles}] 处理失败: ${e.message}`))
+        );
       }
     }
+
+    await Promise.all(articleJobs);
 
     // 汇总
     console.log('\n' + '='.repeat(60));
@@ -705,6 +784,16 @@ program
       return;
     }
 
+    let baijiahaoDailyRecord = null;
+    if (opts.publish && platforms.includes('baijiahao')) {
+      const publishConfig = loadPublishConfig();
+      if (!publishConfig) return;
+      const dailyLimit = Math.max(1, parseInt(publishConfig.baijiahao.daily_limit, 10) || 15);
+      const dailyRecord = loadOrCreateDailyRecord(publishConfig.works, { dailyLimit });
+      baijiahaoDailyRecord = dailyRecord;
+      console.log(`百家号每日发布额度: ${dailyLimit} 篇，今日剩余 ${dailyRecord.record.remaining_total}/${dailyRecord.record.total} 篇`);
+    }
+
     console.log(`找到 ${articles.length} 篇待推送文章（${platformNames}）\n`);
     let successCount = 0;
 
@@ -718,7 +807,13 @@ program
 
       let anySuccess = false;
       for (const p of platforms) {
+        if (p === 'baijiahao' && baijiahaoDailyRecord?.record.remaining_total <= 0) {
+          console.log('百家号今日发布额度已用完，跳过本篇');
+          continue;
+        }
+
         const apiEntries = platformAPIs[p] || [];
+        let baijiahaoArticlePublished = false;
         for (const { account: pAccount } of apiEntries) {
           const pName = platformLabel(p);
           const prefix = pAccount && pAccount.name !== 'default' ? `[${pAccount.name}] ` : '';
@@ -734,11 +829,27 @@ program
               _skipAuth: true,
             });
 
-            if (result && result.success) {
+            const publishRequired = opts.publish && (p === 'baijiahao' || p === 'wechat');
+            const pushSucceeded = result && result.success && (!publishRequired || result.published === true);
+            if (pushSucceeded) {
               anySuccess = true;
+            }
+            if (p === 'baijiahao' && publishRequired && pushSucceeded) {
+              baijiahaoArticlePublished = true;
             }
           } catch (e) {
             console.error(`${prefix}${pName}推送失败: ${e.message}`);
+          }
+        }
+
+        if (p === 'baijiahao' && baijiahaoArticlePublished && baijiahaoDailyRecord) {
+          const works = baijiahaoDailyRecord.record.works;
+          const articleWork = articles[i].meta.work;
+          const quotaWork = works[articleWork] > 0
+            ? articleWork
+            : Object.keys(works).find(work => works[work] > 0);
+          if (quotaWork) {
+            decrementDailyRecord(baijiahaoDailyRecord.recordPath, baijiahaoDailyRecord.record, quotaWork);
           }
         }
       }

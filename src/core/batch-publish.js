@@ -12,7 +12,13 @@ const { ToutiaoAPI } = require('./toutiao-api');
 const { WechatAPI } = require('./wechat-api');
 const { selectCoverImage } = require('./image-library');
 const { resolveProjectFile } = require('./local-file-utils');
-const { normalizeImageMarkers, normalizeMarkdownParagraphs, replaceImageMarkers } = require('./markdown-utils');
+const {
+  normalizeImageMarkers,
+  normalizeMarkdownParagraphs,
+  replaceImageMarkers,
+  countInlineImages,
+  findInlineCoverInsertPosition,
+} = require('./markdown-utils');
 const config = require('./config');
 
 const DEFAULT_IMAGE_DIR = config.imageDir();
@@ -219,11 +225,12 @@ async function pushWithImages(articlePath, imageDir, options = {}) {
       articleImagePaths: imagePaths,
     });
 
-    // 如果封面图来自图库且文中未使用，插入到第一个 ## 标题后
-    if (coverPath && fromLibrary) {
+    // 如果封面图来自图库且文中未使用，补进正文（有小标题放第一个小标题后，否则放第二段后）；
+    // 正文已有 5 张图时不再补
+    if (coverPath && fromLibrary && countInlineImages(finalBody) < 5) {
       const alreadyInArticle = imagePaths.some(p => path.resolve(p) === path.resolve(coverPath));
       if (!alreadyInArticle) {
-        const insertPos = finalBody.indexOf('\n', finalBody.indexOf('## '));
+        const insertPos = findInlineCoverInsertPosition(finalBody);
         if (insertPos !== -1) {
           finalBody = finalBody.slice(0, insertPos) + `\n\n![配图](${coverPath})\n` + finalBody.slice(insertPos);
           console.log(`封面图未在文中出现，已插入到正文`);

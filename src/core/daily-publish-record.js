@@ -23,6 +23,28 @@ function sumWorks(works = {}) {
   return Object.values(works).reduce((sum, count) => sum + (Number(count) || 0), 0);
 }
 
+function limitWorksToCount(sourceWorks = {}, limit = 0) {
+  const normalized = normalizeWorksCount(sourceWorks);
+  const target = Math.min(sumWorks(normalized), Math.max(0, Math.floor(Number(limit) || 0)));
+  const remaining = Object.entries(normalized).map(([work, count], index) => ({ work, count, index }));
+  const result = Object.fromEntries(Object.keys(normalized).map(work => [work, 0]));
+  let left = target;
+
+  while (left > 0) {
+    const available = remaining
+      .filter(item => item.count > 0)
+      .sort((a, b) => b.count - a.count || a.index - b.index);
+    if (!available.length) break;
+    for (const item of available) {
+      if (left <= 0) break;
+      item.count--;
+      result[item.work]++;
+      left--;
+    }
+  }
+  return result;
+}
+
 function getDailyRecordPath(recordDir = PUBLISH_RECORD_DIR, dateKey = getLocalDateKey()) {
   return path.join(recordDir, `baijiahao-${dateKey}.json`);
 }
@@ -57,10 +79,18 @@ function loadOrCreateDailyRecord(sourceWorks, opts = {}) {
   const recordDir = path.resolve(opts.recordDir || PUBLISH_RECORD_DIR);
   const dateKey = opts.dateKey || getLocalDateKey();
   const recordPath = getDailyRecordPath(recordDir, dateKey);
+  const dailyLimit = Math.max(0, Math.floor(Number(opts.dailyLimit) || 0));
 
   if (fs.existsSync(recordPath)) {
     const record = JSON.parse(fs.readFileSync(recordPath, 'utf-8'));
     record.works = normalizeWorksCount(record.works || {});
+    const configuredTotal = Number(record.total) || sumWorks(record.works);
+    const consumed = Math.max(0, configuredTotal - sumWorks(record.works));
+    if (dailyLimit > 0 && configuredTotal > dailyLimit) {
+      record.works = limitWorksToCount(record.works, Math.max(0, dailyLimit - consumed));
+      record.total = dailyLimit;
+      record.daily_limit = dailyLimit;
+    }
     record.remaining_total = sumWorks(record.works);
     const hadRoundFields = 'rounds_total' in record || 'rounds_completed' in record || 'base_batch_size' in record;
     delete record.rounds_total;
@@ -73,7 +103,7 @@ function loadOrCreateDailyRecord(sourceWorks, opts = {}) {
   fs.mkdirSync(recordDir, { recursive: true });
   const deletedOldRecords = deleteOldDailyRecords(recordDir, recordPath);
 
-  const works = normalizeWorksCount(sourceWorks);
+  const works = dailyLimit > 0 ? limitWorksToCount(sourceWorks, dailyLimit) : normalizeWorksCount(sourceWorks);
   const record = {
     date: dateKey,
     source: 'config.json.works',
@@ -81,6 +111,7 @@ function loadOrCreateDailyRecord(sourceWorks, opts = {}) {
     updated_at: '',
     total: sumWorks(works),
     remaining_total: sumWorks(works),
+    daily_limit: dailyLimit || sumWorks(works),
     works,
   };
   writeDailyRecord(recordPath, record);
@@ -138,8 +169,9 @@ function decrementDailyRecord(recordPath, record, work) {
 }
 
 function ensureDailyCategoryQuota(recordPath, record, buildCategoryPlan) {
-  if (!Array.isArray(record.category_queue)) {
-    const total = Number(record.total) || sumWorks(record.works);
+  const recordTotal = Number(record.total) || sumWorks(record.works);
+  if (!Array.isArray(record.category_queue) || Number(record.category_total) !== recordTotal) {
+    const total = recordTotal;
     const remainingTotal = sumWorks(record.works);
     const consumed = Math.max(0, total - remainingTotal);
     const fullQueue = buildCategoryPlan(total);

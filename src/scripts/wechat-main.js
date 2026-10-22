@@ -19,7 +19,11 @@ const { getCategory } = require('../core/categories');
 const { ensureLocalMarkdownSynced, loadBjhSyncState, saveBjhSyncState } = require('../core/notion-local-sync');
 const { loadPlatformAccounts, filterAccounts, getAccountCookie } = require('../core/account-config');
 const { loadConfig, saveConfig } = require('../core/config');
+const { useLlmFor } = require('../core/llm');
 const { resolveProjectFile } = require('../core/local-file-utils');
+const { countInlineImages, findInlineCoverInsertPosition } = require('../core/markdown-utils');
+const { createLimiter, createSerialQueue, runWithLogPrefix, resolveConcurrency } = require('../core/concurrency');
+const { countFamousNames } = require('../core/famous-characters');
 const {
   normalizeWorkWeight,
   buildWeightedWorkQuota,
@@ -33,12 +37,15 @@ const {
   resolveWechatWriterId,
 } = require('../core/wechat-account-setup');
 
+// 公众号的选题、写作和审核按 config.json 里 wechat.llm 选模型
+useLlmFor('wechat');
+
 const SYNC_STATE_FILE = path.join(__dirname, '../..', 'wx-sync-state.json');
 const LEGACY_SYNC_STATE_FILE = path.join(__dirname, '../..', '.wx-sync-state.json');
 const WX_SYNC_DIR = path.join(__dirname, '../..', 'archive', 'wechat', 'sync');
 const WX_GENERATED_DIR = path.join(__dirname, '../..', 'archive', 'wechat', 'generated');
-const DEFAULT_RANDOM_ROUNDS = 20;
-const RANDOM_DRAFT_GROUP_SIZE = 2;
+const DEFAULT_RANDOM_ROUNDS = 10;
+const MAX_COMBINE_ARTICLES = 8; // 公众号一个多图文草稿最多 8 篇
 /**
  * 加载所有作品配置 — 从 config.json 读取
  */
@@ -75,6 +82,20 @@ function summarizeWorkQuota(allocations, countKey = 'quota', multiplier = 1) {
     .filter(item => item[countKey] > 0)
     .map(item => `${item.name} ${item[countKey] * multiplier}篇`)
     .join('、');
+}
+
+// 头条位阅读高于次条（同次群发配对比较约 1.7 倍）：头条给表现最好的书，按 wechat.work_weights 排，
+// 权重相同再看有没有一线人物（冷门书当头条时阅读常常只有个位数）
+function scoreHeadline(item) {
+  const weights = loadWechatConfig().work_weights || {};
+  const title = String(item.title || '');
+  let score = Number(weights[item.work]) || 0;
+  if (countFamousNames(title, item.work) > 0) score += 0.5;
+  return score;
+}
+
+function orderForHeadline(group) {
+  return [...group].sort((a, b) => scoreHeadline(b) - scoreHeadline(a));
 }
 
 function chunkItems(items, size) {
@@ -128,21 +149,18 @@ function resolveWechatImageGroups(category, accountConfig, workConfig, workName)
   const accountGroups = normalizeStringList(accountConfig?.image_dirs);
   if (accountGroups.length) return accountGroups;
 
-  const catDef = getCategory(category);
-  if (catDef?.defaultImageDir) return [catDef.defaultImageDir];
-
   const workGroups = normalizeStringList(workConfig?.image_dirs);
   return workGroups.length ? workGroups : (workName ? [workName] : []);
 }
 
 function buildWechatArticleOptions(category, topArticlesHint, accountConfig, workConfig, workName) {
-  const catDef = getCategory(category);
-  const isStandalone = Boolean(catDef?.standalone);
   return {
-    wordCount: isStandalone ? catDef.maxWords : '2500-3000',
-    enforceWordCount: isStandalone ? catDef.enforceWordCount === true : true,
+    platform: 'wechat',
+    wordCount: '1500-2500',
+    enforceWordCount: true,
     wordCountOverflowRatio: 0.3,
-    maxTokens: isStandalone ? catDef.maxTokens : 7000,
+    maxTokens: 5000,
+    factCheck: loadWechatConfig().fact_check !== false,
     topArticlesHint,
     imageGroups: resolveWechatImageGroups(category, accountConfig, workConfig, workName),
   };
@@ -171,7 +189,7 @@ function resolveWechatCoverImage(accountConfig) {
 async function tryGenerateTopicForWork({ workName, category, attempts, seenTitles }) {
   for (let attempt = 1; attempt <= attempts; attempt++) {
     const overrides = category ? [category] : null;
-    const batch = await generateTopics(1, workName, 'wechat', null, null, overrides);
+    const batch = await generateTopics(1, workName, 'wechat', overrides);
 
     for (const topic of batch) {
       if (!topic || !topic.topic || seenTitles.has(topic.topic)) continue;
@@ -628,11 +646,12 @@ async function syncOneWork(api, workName, workConfig, opts, accountConfig) {
       });
 
       if (coverResult.coverPath) {
-        // 如果封面图来自图库且文中未使用，插入到文中
+        // 如果封面图来自图库且文中未使用，补进正文（有小标题放第一个小标题后，否则放第二段后）；
+        // 正文已有 5 张图时不再补
         if (coverResult.fromLibrary) {
           const alreadyInArticle = imagePaths.some(p => path.resolve(p) === path.resolve(coverResult.coverPath));
-          if (!alreadyInArticle) {
-            const insertPos = finalMarkdown.indexOf('\n', finalMarkdown.indexOf('## '));
+          if (!alreadyInArticle && countInlineImages(finalMarkdown) < 5) {
+            const insertPos = findInlineCoverInsertPosition(finalMarkdown);
             if (insertPos !== -1) {
               finalMarkdown = finalMarkdown.slice(0, insertPos) + `\n\n![配图](${coverResult.coverPath})\n` + finalMarkdown.slice(insertPos);
               console.log(`封面图未在文中出现，已插入到正文`);
@@ -708,12 +727,13 @@ async function syncOneWork(api, workName, workConfig, opts, accountConfig) {
  */
 program
   .command('generate')
-  .description('AI 直接生成文章 → 推送到公众号草稿箱（随机模式默认 40 篇，每 2 篇一个草稿）')
+  .description('AI 直接生成文章 → 推送到公众号草稿箱（随机模式默认 10 轮，每轮的文章合成一个多图文草稿）')
   .argument('[work]', '作品名称，不传则处理所有 count > 0 的作品')
   .option('-a, --account <name>', '指定账号名称，不传则处理所有账号')
   .option('--interval <seconds>', '每篇文章之间的间隔秒数', '15')
-  .option('--rounds <n>', '执行轮次（随机模式默认 20 轮，每轮生成 2 篇）')
+  .option('--rounds <n>', '执行轮次（随机模式默认 10 轮，每轮生成 --random 指定的篇数）')
   .option('--random [n]', '随机模式：按全批权重份额逐轮抽取 n 个合集生成（默认 2）')
+  .option('--concurrency <n>', '同时进行的轮数（每轮内按顺序生成，默认 5，也可在 config.json 的 wechat.concurrency 配置）')
   .option('--per <count>', '随机模式下每个合集生成的文章数', '1')
   .option('--category <name>', '指定本次生成类别，覆盖默认分类权重')
   .option('--no-push', '仅生成文章，不推送到草稿箱')
@@ -830,16 +850,15 @@ program
       ? randomPickCount * perWork
       : fixedWorks.reduce((sum, w) => sum + w.count, 0);
 
-    // 随机模式固定每两篇组成一个多图文草稿；普通模式继续尊重账号 combine 配置。
+    // 随机模式每轮的文章合成一个多图文草稿（--random 3 就是 3 篇一个草稿），超过草稿上限才拆开；普通模式继续尊重账号 combine 配置。
     const wechatCombine = isRandom || account.combine === true;
-    const draftGroupSize = isRandom ? RANDOM_DRAFT_GROUP_SIZE : 0;
+    const draftGroupSize = isRandom ? Math.min(totalArticles, MAX_COMBINE_ARTICLES) : 0;
     const accountAuthor = resolveWechatAuthor(account, publishConfig.wechat || {});
     const accountWriterId = resolveWechatWriterId(account, publishConfig.wechat || {});
     const accountTailImage = resolveWechatTailImage(account);
     const accountCoverImage = resolveWechatCoverImage(account);
 
     // 合并模式下校验不超过 8 篇
-    const MAX_COMBINE_ARTICLES = 8;
     if (wechatCombine && !isRandom && totalArticles > MAX_COMBINE_ARTICLES) {
       console.error(`${prefix}合并模式下最多 ${MAX_COMBINE_ARTICLES} 篇，当前计划 ${totalArticles} 篇，请减少 count 配置`);
       continue;
@@ -901,7 +920,18 @@ program
     let grandTotalSuccess = 0;
     let grandTotalFail = 0;
 
+    // 多轮并发生成（默认同时 5 轮）；每轮开头抽作品、分配类别的代码是同步的，按轮次顺序执行，配额不会乱
+    const wechatConcurrency = resolveConcurrency(opts.concurrency ?? publishConfig.wechat?.concurrency, 5);
+    const roundLimiter = createLimiter(wechatConcurrency);
+    // 上传图片、保存草稿等微信后台接口排队调用
+    const apiQueue = createSerialQueue();
+    if (rounds > 1 && wechatConcurrency > 1) {
+      console.log(`  并发: 同时进行 ${Math.min(wechatConcurrency, rounds)} 轮`);
+    }
+    const roundTasks = [];
     for (let round = 0; round < rounds; round++) {
+    const roundPrefix = rounds > 1 && wechatConcurrency > 1 ? `[第${round + 1}轮]` : '';
+    roundTasks.push(roundLimiter(() => runWithLogPrefix(roundPrefix, async () => {
     if (rounds > 1) {
       console.log(`\n${'▶'.repeat(3)} 第 ${round + 1}/${rounds} 轮`);
     }
@@ -925,7 +955,7 @@ program
     let totalSuccess = 0;
     let totalFail = 0;
     const allResults = [];
-    const draftArticles = []; // 收集本轮文章，按随机模式的两篇一组或普通模式整批保存
+    const draftArticles = []; // 收集本轮文章：随机模式整轮合成一个草稿（超过上限才拆），普通模式整批保存
 
     // ── 分类配额：启动时已按全批总量生成，这里每轮只消费本轮需要的类别 ──
     const roundCategoryPlan = globalCategoryQueue.splice(0, totalArticles);
@@ -1046,47 +1076,47 @@ program
             finalMarkdown += `\n\n![尾图](${tailImage})\n`;
           }
 
-          // 3. 转 HTML
-          let html = mdToHtml(content, 'wechat');
+          // 3-5. 转 HTML、上传封面和正文图片（微信后台接口排队调用，避免并发上传触发限频）
+          const { coverUrl, html } = await apiQueue(async () => {
+            let html = mdToHtml(content, 'wechat');
 
-          // 4. 封面
-          const imagePaths = excludeTailImagePaths(extractImagePaths(finalMarkdown), tailImage);
-          let coverUrl = null;
-          const coverResult = selectCoverImage({
-            title: t.topic,
-            imageDir,
-            workFilter: articleOptions.imageGroups.length ? undefined : actualWorkName,
-            allowedGroups: articleOptions.imageGroups,
-            fallbackToLibrary: Boolean(getCategory(t.category)?.standalone),
-            articleImagePaths: imagePaths,
-          });
+            // 4. 封面
+            const imagePaths = excludeTailImagePaths(extractImagePaths(finalMarkdown), tailImage);
+            let coverUrl = null;
+            const coverResult = selectCoverImage({
+              title: t.topic,
+              imageDir,
+              workFilter: articleOptions.imageGroups.length ? undefined : actualWorkName,
+              allowedGroups: articleOptions.imageGroups,
+              articleImagePaths: imagePaths,
+            });
 
-          if (coverResult.coverPath) {
-            if (coverResult.fromLibrary) {
-              console.log(`  封面（标题角色）: ${path.basename(coverResult.coverPath)}`);
-            } else {
-              console.log(`  封面（文中配图）: ${path.basename(coverResult.coverPath)}`);
+            if (coverResult.coverPath) {
+              if (coverResult.fromLibrary) {
+                console.log(`  封面（标题角色）: ${path.basename(coverResult.coverPath)}`);
+              } else {
+                console.log(`  封面（文中配图）: ${path.basename(coverResult.coverPath)}`);
+              }
+              const uploaded = await api.uploadImage(coverResult.coverPath);
+              coverUrl = uploaded?.url || null;
+            } else if (accountCoverImage) {
+              const uploaded = await api.uploadImage(accountCoverImage);
+              coverUrl = uploaded?.url || null;
             }
-            const uploaded = await api.uploadImage(coverResult.coverPath);
-            coverUrl = uploaded?.url || null;
-          } else if (accountCoverImage) {
-            const uploaded = await api.uploadImage(accountCoverImage);
-            coverUrl = uploaded?.url || null;
-          } else if (getCategory(t.category)?.standalone) {
-            console.warn(`  未找到独立文案封面，请向 images/${articleOptions.imageGroups.join('、') || '女性朋友圈文案'}/ 添加图片或配置 cover_image`);
-          }
 
-          // 5. 上传正文图片
-          console.log('  上传图片...');
-          html = await api.processContentImages(html);
-          html = html.replace(/<img[^>]+src="(?!https?:\/\/)[^"]*"[^>]*>/gi, () => '');
-          let tailHtml = '';
-          if (tailImage) {
-            tailHtml = mdToHtml(`![尾图](${tailImage})`, 'wechat');
-            tailHtml = await api.processContentImages(tailHtml);
-            tailHtml = tailHtml.replace(/<img[^>]+src="(?!https?:\/\/)[^"]*"[^>]*>/gi, () => '');
-          }
-          html = appendWechatFooterHtml(html, pastRecommendations, pastRecommendationsLimit, tailHtml);
+            // 5. 上传正文图片
+            console.log('  上传图片...');
+            html = await api.processContentImages(html);
+            html = html.replace(/<img[^>]+src="(?!https?:\/\/)[^"]*"[^>]*>/gi, () => '');
+            let tailHtml = '';
+            if (tailImage) {
+              tailHtml = mdToHtml(`![尾图](${tailImage})`, 'wechat');
+              tailHtml = await api.processContentImages(tailHtml);
+              tailHtml = tailHtml.replace(/<img[^>]+src="(?!https?:\/\/)[^"]*"[^>]*>/gi, () => '');
+            }
+            html = appendWechatFooterHtml(html, pastRecommendations, pastRecommendationsLimit, tailHtml);
+            return { coverUrl, html };
+          });
 
           // 6. 收集到待合并列表
           const albumInfo = buildAlbumInfo(actualWorkConfig);
@@ -1096,6 +1126,7 @@ program
             coverUrl,
             options: { albumInfo, author: accountAuthor, writerId: accountWriterId },
             work: actualWorkName,
+            category: t.category,
           });
           totalSuccess++;
           allResults.push({ work: actualWorkName, plannedWork: workName, title: t.topic, success: true });
@@ -1129,7 +1160,7 @@ program
           const retryCategory = failedItem.category
             || (retryCategoriesByWork[workName] && retryCategoriesByWork[workName].shift())
             || (categoriesByWork[workName] && categoriesByWork[workName][0])
-            || '数字盘点类';
+            || '动机揭秘类';
           const retryTopics = await generateTopicsWithRetry({
             count: 1,
             workName,
@@ -1181,40 +1212,41 @@ program
             if (tailImage) {
               finalMarkdown += `\n\n![尾图](${tailImage})\n`;
             }
-            let html = mdToHtml(content, 'wechat');
-            const imagePaths = excludeTailImagePaths(extractImagePaths(finalMarkdown), tailImage);
-            let coverUrl = null;
-            const coverResult = selectCoverImage({
-              title: topic.topic,
-              imageDir,
-              workFilter: retryArticleOptions.imageGroups.length ? undefined : actualTopicWork,
-              allowedGroups: retryArticleOptions.imageGroups,
-              fallbackToLibrary: Boolean(getCategory(topic.category)?.standalone),
-              articleImagePaths: imagePaths,
+            const { coverUrl, html } = await apiQueue(async () => {
+              let html = mdToHtml(content, 'wechat');
+              const imagePaths = excludeTailImagePaths(extractImagePaths(finalMarkdown), tailImage);
+              let coverUrl = null;
+              const coverResult = selectCoverImage({
+                title: topic.topic,
+                imageDir,
+                workFilter: retryArticleOptions.imageGroups.length ? undefined : actualTopicWork,
+                allowedGroups: retryArticleOptions.imageGroups,
+                articleImagePaths: imagePaths,
+              });
+              if (coverResult.coverPath) {
+                const uploaded = await api.uploadImage(coverResult.coverPath);
+                coverUrl = uploaded?.url || null;
+              } else if (accountCoverImage) {
+                const uploaded = await api.uploadImage(accountCoverImage);
+                coverUrl = uploaded?.url || null;
+              }
+              html = await api.processContentImages(html);
+              html = html.replace(/<img[^>]+src="(?!https?:\/\/)[^"]*"[^>]*>/gi, () => '');
+              let tailHtml = '';
+              if (tailImage) {
+                tailHtml = mdToHtml(`![尾图](${tailImage})`, 'wechat');
+                tailHtml = await api.processContentImages(tailHtml);
+                tailHtml = tailHtml.replace(/<img[^>]+src="(?!https?:\/\/)[^"]*"[^>]*>/gi, () => '');
+              }
+              html = appendWechatFooterHtml(html, pastRecommendations, pastRecommendationsLimit, tailHtml);
+              return { coverUrl, html };
             });
-            if (coverResult.coverPath) {
-              const uploaded = await api.uploadImage(coverResult.coverPath);
-              coverUrl = uploaded?.url || null;
-            } else if (accountCoverImage) {
-              const uploaded = await api.uploadImage(accountCoverImage);
-              coverUrl = uploaded?.url || null;
-            } else if (getCategory(topic.category)?.standalone) {
-              console.warn(`  未找到独立文案封面，请向 images/${retryArticleOptions.imageGroups.join('、') || '女性朋友圈文案'}/ 添加图片或配置 cover_image`);
-            }
-            html = await api.processContentImages(html);
-            html = html.replace(/<img[^>]+src="(?!https?:\/\/)[^"]*"[^>]*>/gi, () => '');
-            let tailHtml = '';
-            if (tailImage) {
-              tailHtml = mdToHtml(`![尾图](${tailImage})`, 'wechat');
-              tailHtml = await api.processContentImages(tailHtml);
-              tailHtml = tailHtml.replace(/<img[^>]+src="(?!https?:\/\/)[^"]*"[^>]*>/gi, () => '');
-            }
-            html = appendWechatFooterHtml(html, pastRecommendations, pastRecommendationsLimit, tailHtml);
 
             const albumInfo = buildAlbumInfo(actualTopicConfig);
             draftArticles.push({
               title: topic.topic, content: html, coverUrl,
               options: { albumInfo, author: accountAuthor, writerId: accountWriterId }, work: actualTopicWork,
+              category: topic.category,
             });
           }
 
@@ -1236,8 +1268,8 @@ program
     if (draftArticles.length > 0 && opts.push !== false) {
       if (wechatCombine) {
         const groups = isRandom
-          ? chunkItems(draftArticles, draftGroupSize)
-          : [draftArticles];
+          ? chunkItems(draftArticles, draftGroupSize).map(orderForHeadline)
+          : [orderForHeadline(draftArticles)];
         console.log(`\n${'─'.repeat(60)}`);
         console.log(`  保存多图文草稿（${groups.length} 个，每组最多 ${isRandom ? draftGroupSize : draftArticles.length} 篇）...`);
         console.log('─'.repeat(60));
@@ -1245,7 +1277,7 @@ program
         for (let groupIndex = 0; groupIndex < groups.length; groupIndex++) {
           const group = groups[groupIndex];
           console.log(`  保存第 ${groupIndex + 1}/${groups.length} 个草稿（${group.length} 篇）...`);
-          const result = await api.saveMultiDraft(group);
+          const result = await apiQueue(() => api.saveMultiDraft(group));
           const groupKeys = new Set(group.map(item => `${item.work || ''}\u0000${item.title}`));
           const groupResults = allResults.filter(item => (
             item.success
@@ -1280,7 +1312,7 @@ program
             console.log(`  等待 ${opts.interval} 秒...`);
             await new Promise(r => setTimeout(r, interval));
           }
-          const result = await api.saveDraft(da.title, da.content, da.coverUrl, da.options);
+          const result = await apiQueue(() => api.saveDraft(da.title, da.content, da.coverUrl, da.options));
           const matchResult = allResults.find(r => r.title === da.title && r.success && !r.skipped);
           if (result.success) {
             console.log(`  ✓ ${da.title} (ID: ${result.article_id})`);
@@ -1330,7 +1362,11 @@ program
 
     grandTotalSuccess += totalSuccess;
     grandTotalFail += totalFail;
+    })).catch(e => {
+      console.error(`  第 ${round + 1} 轮处理失败: ${e.message}`);
+    }));
     } // end rounds loop
+    await Promise.all(roundTasks);
 
     if (rounds > 1) {
       console.log(`\n${'='.repeat(60)}`);

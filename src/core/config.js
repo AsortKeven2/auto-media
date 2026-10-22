@@ -32,6 +32,22 @@ function get(key, fallback) {
   return config[key] !== undefined && config[key] !== '' ? config[key] : (fallback || '');
 }
 
+/** 平台用哪个模型：config.json 里该平台下的 llm，"claude"、"workbuddy" 或 "doubao"（不写默认豆包） */
+function llmProvider(platform) {
+  const section = platform ? loadConfig()[platform] : null;
+  return (section && section.llm) || 'doubao';
+}
+
+/** Claude 的设置：config.json 顶层的 claude（model、effort、bin） */
+function claudeSettings() {
+  return loadConfig().claude || {};
+}
+
+/** WorkBuddy 网关的设置：config.json 顶层的 workbuddy（base_url 到 /v1 为止、api_key、model） */
+function workbuddySettings() {
+  return loadConfig().workbuddy || {};
+}
+
 function doubaoKey()   { return get('doubao_api_key'); }
 function doubaoModel() { return get('doubao_model', 'doubao-seed-1-8-251228'); }
 function imageDir()    { const v = get('image_dir'); return v ? path.resolve(PROJECT_ROOT, v) : path.join(PROJECT_ROOT, 'images'); }
@@ -51,6 +67,9 @@ function saveConfig(config) {
 
 module.exports = {
   loadConfig,
+  llmProvider,
+  claudeSettings,
+  workbuddySettings,
   doubaoKey,
   doubaoModel,
   imageDir,

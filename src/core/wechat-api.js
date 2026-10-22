@@ -752,7 +752,7 @@ class WechatAPI {
     const claimSourceType = options.claimSourceType || '4';  // 个人观点，仅供参考
     const claimSource = options.claimSource || '个人观点，仅供参考';
     const albumInfo = options.albumInfo || '{"appmsg_album_infos":[]}';
-    const canReward = options.canReward !== false;
+    const canReward = options.canReward === true;  // 赞赏默认关闭，明确传 true 才开
 
     // 处理封面图
     let thumbUrl = '';
@@ -1024,7 +1024,7 @@ class WechatAPI {
       const claimSourceType = opts.claimSourceType || '4';
       const claimSource = opts.claimSource || '个人观点，仅供参考';
       const albumInfo = opts.albumInfo || '{"appmsg_album_infos":[]}';
-      const canReward = opts.canReward !== false;
+      const canReward = opts.canReward === true;  // 赞赏默认关闭，明确传 true 才开
 
       // 处理封面图
       let thumbUrl = '';
